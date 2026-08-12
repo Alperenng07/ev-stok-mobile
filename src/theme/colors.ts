@@ -1,0 +1,17 @@
+export const colors = {
+  bg: '#F4F7F5',
+  bgElevated: '#FFFFFF',
+  ink: '#14201B',
+  inkMuted: '#5B6B63',
+  brand: '#0F3D2E',
+  brandSoft: '#1F6B4F',
+  accent: '#E8A838',
+  danger: '#B42318',
+  dangerSoft: '#FEE4E2',
+  ok: '#027A48',
+  okSoft: '#D1FADF',
+  warn: '#B54708',
+  warnSoft: '#FEF0C7',
+  border: '#D7E0DB',
+  overlay: 'rgba(15, 61, 46, 0.45)',
+}
