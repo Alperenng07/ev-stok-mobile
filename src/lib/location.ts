@@ -7,6 +7,7 @@ export type UserLocation = {
   lat: number
   lng: number
   label: string
+  resolvedAddress: string
   accuracyM: number | null
 }
 
@@ -66,21 +67,27 @@ export async function resolveLiveLocation(): Promise<UserLocation> {
   }
   const accuracyM = pos.coords.accuracy ?? null
 
-  let label = `${lat.toFixed(5)}, ${lng.toFixed(5)}`
+  let resolvedAddress = `${lat.toFixed(5)}, ${lng.toFixed(5)}`
   try {
     const places = await Location.reverseGeocodeAsync({ latitude: lat, longitude: lng })
     const p = places[0]
     if (p) {
       const parts = [p.street, p.district, p.subregion || p.city, p.region].filter(Boolean)
-      const placeLabel =
-        parts.filter((v, i, arr) => arr.indexOf(v) === i).slice(0, 4).join(', ') || label
-      label = `${placeLabel} (${lat.toFixed(5)}, ${lng.toFixed(5)})`
+      resolvedAddress =
+        parts.filter((v, i, arr) => arr.indexOf(v) === i).slice(0, 4).join(', ') ||
+        resolvedAddress
     }
   } catch {
     /* optional */
   }
 
-  return { lat, lng, label, accuracyM }
+  return {
+    lat,
+    lng,
+    label: `${resolvedAddress} (${lat.toFixed(5)}, ${lng.toFixed(5)})`,
+    resolvedAddress,
+    accuracyM,
+  }
 }
 
 export async function resolveBudgetLocation(
@@ -92,12 +99,28 @@ export async function resolveBudgetLocation(
       throw new LocationError('Kayıtlı konum bulunamadı.')
     }
     if (!isValidTurkeyCoord(place.lat, place.lng)) {
-      throw new LocationError('Kayıtlı konum geçersiz. Adresi yeniden ekle.')
+      throw new LocationError('Kayıtlı konum geçersiz. Adresi silip yeniden ekle.')
+    }
+    let resolvedAddress = place.label
+    try {
+      const places = await Location.reverseGeocodeAsync({
+        latitude: place.lat,
+        longitude: place.lng,
+      })
+      const p = places[0]
+      if (p) {
+        const parts = [p.street, p.district, p.subregion || p.city, p.region].filter(Boolean)
+        const built = parts.filter((v, i, arr) => arr.indexOf(v) === i).slice(0, 4).join(', ')
+        if (built) resolvedAddress = built
+      }
+    } catch {
+      /* keep place.label */
     }
     return {
       lat: place.lat,
       lng: place.lng,
-      label: `${place.name} · ${place.label}`,
+      label: `${place.name} · ${resolvedAddress}`,
+      resolvedAddress,
       accuracyM: null,
     }
   }

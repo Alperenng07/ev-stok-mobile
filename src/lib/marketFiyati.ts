@@ -93,7 +93,15 @@ function mapProduct(
         Number.isFinite(lat) && Number.isFinite(lng)
           ? Math.round(haversineKm(userLat, userLng, lat, lng) * 10) / 10
           : 99
-      if (maxDistanceKm != null && distanceKm > maxDistanceKm + 0.5) return null
+      // depots listesi zaten konumu belirler; ekstra mesafe filtresi
+      // geçerli şubeleri (özellikle sınırdakileri) yanlışlıkla elemesin.
+      if (
+        !allowedDepotIds &&
+        maxDistanceKm != null &&
+        distanceKm > maxDistanceKm + 0.5
+      ) {
+        return null
+      }
       return {
         depotId,
         depotName: d.depotName,
@@ -123,13 +131,36 @@ function mapProduct(
 /**
  * marketfiyati.org.tr resmi akışı: önce yakındaki marketleri al.
  * /search'e depots verilmezse API İstanbul varsayılanına düşüyor.
+ * Mesafe: sitedeki gibi km (varsayılan 1; sonuç azsa genişletilir).
  */
 export async function fetchNearestDepots(options: {
   latitude: number
   longitude: number
   distanceKm?: number
 }): Promise<NearestDepot[]> {
-  const distanceKm = options.distanceKm ?? 8
+  const distances =
+    options.distanceKm != null
+      ? [options.distanceKm]
+      : [1, 3, 5, 10]
+
+  let best: NearestDepot[] = []
+  for (const distanceKm of distances) {
+    const batch = await fetchNearestDepotsOnce({
+      latitude: options.latitude,
+      longitude: options.longitude,
+      distanceKm,
+    })
+    if (batch.length > best.length) best = batch
+    if (best.length >= 8) break
+  }
+  return best.slice(0, 40)
+}
+
+async function fetchNearestDepotsOnce(options: {
+  latitude: number
+  longitude: number
+  distanceKm: number
+}): Promise<NearestDepot[]> {
   const res = await fetch(NEAREST_URL, {
     method: 'POST',
     headers: {
@@ -139,7 +170,7 @@ export async function fetchNearestDepots(options: {
     body: JSON.stringify({
       latitude: options.latitude,
       longitude: options.longitude,
-      distance: distanceKm,
+      distance: options.distanceKm,
     }),
   })
   if (!res.ok) {

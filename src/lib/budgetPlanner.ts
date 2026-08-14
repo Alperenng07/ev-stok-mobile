@@ -9,7 +9,7 @@ import type {
   PricedLine,
   ProductCandidate,
 } from '../types/budget'
-import { chainById } from './chains'
+import { chainById, normalizeChainId } from './chains'
 import {
   cheapestPerChain,
   fetchNearestDepots,
@@ -17,7 +17,9 @@ import {
   rankProductsForPicker,
   searchProductsForItem,
   type MarketDepotOffer,
+  type NearestDepot,
 } from './marketFiyati'
+import { haversineKm } from './location'
 
 function round2(n: number): number {
   return Math.round(n * 100) / 100
@@ -153,7 +155,10 @@ function buildPlan(options: {
 
 /** Mevcut satırlardan planları yeniden kur (ürün seçimi değişince). */
 export function rebuildBudgetFromLines(
-  base: Pick<BudgetResult, 'locationKey' | 'locationLabel' | 'location' | 'disclaimer' | 'source'>,
+  base: Pick<
+    BudgetResult,
+    'locationKey' | 'locationLabel' | 'resolvedAddress' | 'location' | 'disclaimer' | 'source'
+  > & { stores?: NearbyStore[] },
   lines: PricedLine[],
 ): BudgetResult {
   const matched = lines.filter((l) => l.matched && l.offers.length > 0)
@@ -206,11 +211,18 @@ export function rebuildBudgetFromLines(
     : bestTotal
   const potentialSaving = round2(Math.max(0, worstSingleTotal - bestTotal))
 
+  const storesFromOffers = collectStores(lines)
+  const stores =
+    base.stores && base.stores.length > 0
+      ? mergeStores(base.stores, storesFromOffers)
+      : storesFromOffers
+
   return {
     locationKey: base.locationKey,
     locationLabel: base.locationLabel,
+    resolvedAddress: base.resolvedAddress,
     location: base.location,
-    stores: collectStores(lines),
+    stores,
     lines,
     plans,
     bestTotal,
@@ -219,6 +231,15 @@ export function rebuildBudgetFromLines(
     source: base.source,
     disclaimer: base.disclaimer,
   }
+}
+
+function mergeStores(primary: NearbyStore[], extra: NearbyStore[]): NearbyStore[] {
+  const map = new Map<string, NearbyStore>()
+  for (const s of [...primary, ...extra]) {
+    const prev = map.get(s.id)
+    if (!prev || s.distanceKm < prev.distanceKm) map.set(s.id, s)
+  }
+  return [...map.values()].sort((a, b) => a.distanceKm - b.distanceKm)
 }
 
 /** Kullanıcı farklı marketfiyati ürününü seçince satırı ve planları günceller. */
@@ -250,22 +271,33 @@ export async function buildLiveBudgetPlans(options: {
   longitude: number
   locationLabel: string
   locationKey: string
+  resolvedAddress?: string
   distanceKm?: number
 }): Promise<BudgetResult> {
   const { pendingItems, latitude, longitude, locationLabel, locationKey } = options
-  const distanceKm = options.distanceKm ?? 8
+  const resolvedAddress =
+    options.resolvedAddress ?? `${latitude.toFixed(5)}, ${longitude.toFixed(5)}`
 
-  const nearest = await fetchNearestDepots({ latitude, longitude, distanceKm })
+  // Mesafe verilmezse 1→3→5→10 km genişler (resmi site gibi).
+  const nearest = await fetchNearestDepots({
+    latitude,
+    longitude,
+    distanceKm: options.distanceKm,
+  })
   const depotIds = nearest.map((d) => d.id)
+  const nearestStores = nearestToStores(nearest)
+
   if (depotIds.length === 0) {
     return rebuildBudgetFromLines(
       {
         locationKey,
         locationLabel,
+        resolvedAddress,
         location: { lat: latitude, lng: longitude },
+        stores: [],
         source: 'marketfiyati',
         disclaimer:
-          'Bu konum civarında marketfiyati.org.tr’de kayıtlı market bulunamadı. Mesafeyi genişletmek için tekrar dene veya kayıtlı adresi kontrol et.',
+          'Bu konum civarında marketfiyati.org.tr’de kayıtlı market bulunamadı. Kayıtlı Ev/İş pinini silip GPS ile yeniden ekle.',
       },
       pendingItems.map((item) => ({
         itemId: item.id,
@@ -281,6 +313,27 @@ export async function buildLiveBudgetPlans(options: {
     )
   }
 
+  const closest = nearest[0]
+  if (
+    closest &&
+    Number.isFinite(closest.lat) &&
+    Number.isFinite(closest.lng) &&
+    haversineKm(latitude, longitude, closest.lat, closest.lng) > 35
+  ) {
+    throw new Error(
+      `Yakın market listesi konumla uyuşmuyor (ör. ${closest.sellerName}). Kayıtlı konumu silip GPS ile yeniden kaydet.`,
+    )
+  }
+
+  const sampleNames = nearest
+    .slice(0, 4)
+    .map((d) => d.sellerName)
+    .join(' · ')
+  const searchDistanceKm = Math.max(
+    3,
+    Math.ceil(nearest[nearest.length - 1]?.distanceKm ?? 3) + 1,
+  )
+
   const lines: PricedLine[] = []
 
   for (const item of pendingItems) {
@@ -290,7 +343,7 @@ export async function buildLiveBudgetPlans(options: {
         itemName: item.name,
         latitude,
         longitude,
-        distanceKm,
+        distanceKm: searchDistanceKm,
         depotIds,
       })
       const bestPick = rankProducts(item.name, products)[0] ?? null
@@ -348,11 +401,24 @@ export async function buildLiveBudgetPlans(options: {
     {
       locationKey,
       locationLabel: `${locationLabel} · ${depotIds.length} yakın market`,
+      resolvedAddress: `${resolvedAddress} · örn. ${sampleNames}`,
       location: { lat: latitude, lng: longitude },
+      stores: nearestStores,
       source: 'marketfiyati',
       disclaimer:
-        'Fiyatlar seçilen konuma göre yakındaki marketlerden (marketfiyati.org.tr) alınır. Yanlış ürün eşleşirse “Başka ürün seç”.',
+        'Fiyatlar yalnızca bu konuma yakın marketlerden (marketfiyati.org.tr /nearest → depots). Şube adında başka şehir görürsen konumu GPS ile yeniden kaydet.',
     },
     lines,
   )
+}
+
+function nearestToStores(nearest: NearestDepot[]): NearbyStore[] {
+  return nearest.map((d) => ({
+    id: d.id,
+    chainId: normalizeChainId(d.marketName || d.id),
+    name: d.sellerName,
+    distanceKm: d.distanceKm,
+    lat: d.lat,
+    lng: d.lng,
+  }))
 }

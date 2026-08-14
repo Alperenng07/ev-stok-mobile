@@ -98,7 +98,10 @@ export type BudgetResult = {
   /** Hangi alışveriş konumuna ait (Ev/İş/anlık). Değişince eski sonuç kullanılmaz. */
   locationKey: string
   locationLabel: string
+  /** Reverse-geocode / doğrulanmış konum özeti */
+  resolvedAddress: string
   location: { lat: number; lng: number }
+  /** /nearest sonucundan — aramada kullanılan marketler */
   stores: NearbyStore[]
   lines: PricedLine[]
   plans: BudgetPlan[]

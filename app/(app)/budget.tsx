@@ -78,16 +78,14 @@ export default function BudgetScreen() {
     )
     try {
       const loc = await resolveBudgetLocation(activePrefs)
-      setStatus(
-        `Konum: ${loc.label} — marketfiyati.org.tr’den ${pending.length} ürün için canlı fiyat çekiliyor…`,
-      )
+      setStatus(`Doğrulanan konum: ${loc.resolvedAddress} — yakındaki marketler alınıyor…`)
       const next = await buildLiveBudgetPlans({
         pendingItems: pending,
         latitude: loc.lat,
         longitude: loc.lng,
         locationLabel: loc.label,
         locationKey: key,
-        distanceKm: 8,
+        resolvedAddress: loc.resolvedAddress,
       })
       setResult(next)
       setCache(next)
@@ -201,9 +199,17 @@ export default function BudgetScreen() {
         {activeResult ? (
           <ScrollView contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
             <Banner
-              text={`Konum: ${activeResult.locationLabel} (${activeResult.location.lat.toFixed(4)}, ${activeResult.location.lng.toFixed(4)})`}
+              text={`Arama noktası: ${activeResult.resolvedAddress}\n${activeResult.locationLabel} (${activeResult.location.lat.toFixed(5)}, ${activeResult.location.lng.toFixed(5)})`}
               tone="ok"
             />
+            {activeResult.stores.length > 0 ? (
+              <Banner
+                text={`Bu konumda aranan marketler:\n${activeResult.stores
+                  .slice(0, 8)
+                  .map((s) => `• ${s.name}${Number.isFinite(s.distanceKm) ? ` (${s.distanceKm} km)` : ''}`)
+                  .join('\n')}`}
+              />
+            ) : null}
             <Banner text={activeResult.disclaimer} />
 
             <Text style={styles.section}>Ürün eşleşmeleri</Text>
