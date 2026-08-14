@@ -336,8 +336,8 @@ export function LocationPicker({ prefs, onChange }: Props) {
         </Pressable>
       </View>
       <Text style={styles.hint}>
-        İl → ilçe → mahalle → sokak seç, çıkan sonuçlardan doğru olanı seç. İlçe adı yanlışsa
-        kaydetme.
+        İlçe seçtikten sonra sonuçlar sadece o ilçe içinde aranır. Listede Kadıköy/Moda gibi başka
+        ilçe görürsen kaydetme.
       </Text>
 
       <View style={styles.chips}>

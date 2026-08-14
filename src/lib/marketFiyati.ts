@@ -6,7 +6,8 @@ import {
   searchKeywordsFor,
 } from './productMatch'
 
-const API_URL = 'https://api.marketfiyati.org.tr/api/v2/search'
+const SEARCH_URL = 'https://api.marketfiyati.org.tr/api/v2/search'
+const NEAREST_URL = 'https://api.marketfiyati.org.tr/api/v2/nearest'
 
 export type MarketDepotOffer = {
   depotId: string
@@ -28,6 +29,15 @@ export type MarketProduct = {
   volume: string | null
   depots: MarketDepotOffer[]
   matchScore?: number
+}
+
+export type NearestDepot = {
+  id: string
+  sellerName: string
+  marketName: string
+  lat: number
+  lng: number
+  distanceKm: number
 }
 
 type ApiDepot = {
@@ -54,19 +64,38 @@ type ApiSearchResponse = {
   content?: ApiProduct[]
 }
 
-function mapProduct(raw: ApiProduct, userLat: number, userLng: number): MarketProduct | null {
+type ApiNearestItem = {
+  id?: string
+  sellerName?: string
+  marketName?: string
+  distance?: number
+  location?: { lat?: number; lon?: number }
+}
+
+function mapProduct(
+  raw: ApiProduct,
+  userLat: number,
+  userLng: number,
+  allowedDepotIds?: Set<string>,
+  maxDistanceKm?: number,
+): MarketProduct | null {
   if (!raw.id || !raw.title) return null
   const depots = (raw.productDepotInfoList ?? [])
     .map((d) => {
       if (d.price == null || !d.depotName || !d.marketAdi) return null
+      const depotId = d.depotId ?? `${d.marketAdi}-${d.depotName}`
+      if (allowedDepotIds && allowedDepotIds.size > 0 && !allowedDepotIds.has(depotId)) {
+        return null
+      }
       const lat = Number(d.latitude)
       const lng = Number(d.longitude)
       const distanceKm =
         Number.isFinite(lat) && Number.isFinite(lng)
           ? Math.round(haversineKm(userLat, userLng, lat, lng) * 10) / 10
           : 99
+      if (maxDistanceKm != null && distanceKm > maxDistanceKm + 0.5) return null
       return {
-        depotId: d.depotId ?? `${d.marketAdi}-${d.depotName}`,
+        depotId,
         depotName: d.depotName,
         price: Number(d.price),
         unitPriceValue: d.unitPriceValue == null ? null : Number(d.unitPriceValue),
@@ -91,17 +120,77 @@ function mapProduct(raw: ApiProduct, userLat: number, userLng: number): MarketPr
   }
 }
 
+/**
+ * marketfiyati.org.tr resmi akışı: önce yakındaki marketleri al.
+ * /search'e depots verilmezse API İstanbul varsayılanına düşüyor.
+ */
+export async function fetchNearestDepots(options: {
+  latitude: number
+  longitude: number
+  distanceKm?: number
+}): Promise<NearestDepot[]> {
+  const distanceKm = options.distanceKm ?? 8
+  const res = await fetch(NEAREST_URL, {
+    method: 'POST',
+    headers: {
+      Accept: 'application/json',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      latitude: options.latitude,
+      longitude: options.longitude,
+      distance: distanceKm,
+    }),
+  })
+  if (!res.ok) {
+    throw new Error(`Yakın market listesi alınamadı: ${res.status}`)
+  }
+  const data = (await res.json()) as ApiNearestItem[]
+  if (!Array.isArray(data)) return []
+
+  return data
+    .map((item) => {
+      if (!item.id) return null
+      const lat = Number(item.location?.lat)
+      const lng = Number(item.location?.lon)
+      const distanceKmFromApi =
+        item.distance != null && Number.isFinite(item.distance)
+          ? Math.round((Number(item.distance) / 1000) * 10) / 10
+          : Number.isFinite(lat) && Number.isFinite(lng)
+            ? Math.round(
+                haversineKm(options.latitude, options.longitude, lat, lng) * 10,
+              ) / 10
+            : 99
+      return {
+        id: item.id,
+        sellerName: item.sellerName ?? item.id,
+        marketName: item.marketName ?? '',
+        lat,
+        lng,
+        distanceKm: distanceKmFromApi,
+      } satisfies NearestDepot
+    })
+    .filter((d): d is NearestDepot => d != null)
+    .sort((a, b) => a.distanceKm - b.distanceKm)
+}
+
 export async function searchMarketPrices(options: {
   keywords: string
   latitude: number
   longitude: number
   distanceKm?: number
   size?: number
+  /** Zorunlu: yoksa API yanlış şehire (İstanbul) düşer */
+  depotIds: string[]
 }): Promise<MarketProduct[]> {
   const keywords = options.keywords.trim()
   if (!keywords) return []
+  if (!options.depotIds.length) return []
 
-  const res = await fetch(API_URL, {
+  const distanceKm = options.distanceKm ?? 8
+  const allowed = new Set(options.depotIds)
+
+  const res = await fetch(SEARCH_URL, {
     method: 'POST',
     headers: {
       Accept: 'application/json',
@@ -111,8 +200,9 @@ export async function searchMarketPrices(options: {
       keywords,
       latitude: options.latitude,
       longitude: options.longitude,
-      distance: options.distanceKm ?? 8,
+      distance: distanceKm,
       size: options.size ?? 20,
+      depots: options.depotIds,
     }),
   })
 
@@ -122,7 +212,7 @@ export async function searchMarketPrices(options: {
 
   const data = (await res.json()) as ApiSearchResponse
   return (data.content ?? [])
-    .map((p) => mapProduct(p, options.latitude, options.longitude))
+    .map((p) => mapProduct(p, options.latitude, options.longitude, allowed, distanceKm + 2))
     .filter((p): p is MarketProduct => p != null)
 }
 
@@ -132,7 +222,9 @@ export async function searchProductsForItem(options: {
   latitude: number
   longitude: number
   distanceKm?: number
+  depotIds: string[]
 }): Promise<MarketProduct[]> {
+  if (!options.depotIds.length) return []
   const keywords = searchKeywordsFor(options.itemName)
   const byId = new Map<string, MarketProduct>()
 
@@ -142,12 +234,12 @@ export async function searchProductsForItem(options: {
       latitude: options.latitude,
       longitude: options.longitude,
       distanceKm: options.distanceKm,
+      depotIds: options.depotIds,
       size: 20,
     })
     for (const p of batch) {
       if (!byId.has(p.id)) byId.set(p.id, p)
     }
-    // İyi adaylar erken geldiyse fazla istek atma
     const good = [...byId.values()].filter(
       (p) => scoreProductTitle(options.itemName, p.title) >= minAcceptScore(options.itemName),
     )
@@ -157,10 +249,6 @@ export async function searchProductsForItem(options: {
   return [...byId.values()]
 }
 
-/**
- * Liste ürünü için skorlanan adaylar (en iyi önce).
- * `minScore` verilirse eşiği geçersiz kılar (seçim listesi için daha geniş).
- */
 export function rankProducts(
   query: string,
   products: MarketProduct[],
@@ -182,15 +270,10 @@ export function rankProducts(
     .map((r) => r.product)
 }
 
-/**
- * Liste ürünü için en uygun marketfiyati ürününü seçer.
- * Skor yetmezse null döner (yanlış ürün dayatılmaz).
- */
 export function pickBestProduct(query: string, products: MarketProduct[]): MarketProduct | null {
   return rankProducts(query, products)[0] ?? null
 }
 
-/** Otomatik seçim + kullanıcıya gösterilecek daha geniş aday havuzu. */
 export function rankProductsForPicker(query: string, products: MarketProduct[]): MarketProduct[] {
   const strict = rankProducts(query, products)
   const wide = rankProducts(query, products, 35)
@@ -198,7 +281,6 @@ export function rankProductsForPicker(query: string, products: MarketProduct[]):
   for (const p of [...strict, ...wide]) {
     if (!byId.has(p.id)) byId.set(p.id, p)
   }
-  // Sırayı skora göre koru
   return [...byId.values()]
     .sort((a, b) => (b.matchScore ?? 0) - (a.matchScore ?? 0))
     .slice(0, 10)

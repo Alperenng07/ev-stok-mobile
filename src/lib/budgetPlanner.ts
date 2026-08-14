@@ -12,6 +12,7 @@ import type {
 import { chainById } from './chains'
 import {
   cheapestPerChain,
+  fetchNearestDepots,
   rankProducts,
   rankProductsForPicker,
   searchProductsForItem,
@@ -252,6 +253,31 @@ export async function buildLiveBudgetPlans(options: {
   const { pendingItems, latitude, longitude, locationLabel } = options
   const distanceKm = options.distanceKm ?? 8
 
+  const nearest = await fetchNearestDepots({ latitude, longitude, distanceKm })
+  const depotIds = nearest.map((d) => d.id)
+  if (depotIds.length === 0) {
+    return rebuildBudgetFromLines(
+      {
+        locationLabel,
+        location: { lat: latitude, lng: longitude },
+        source: 'marketfiyati',
+        disclaimer:
+          'Bu konum civarında marketfiyati.org.tr’de kayıtlı market bulunamadı. Mesafeyi genişletmek için tekrar dene veya kayıtlı adresi kontrol et.',
+      },
+      pendingItems.map((item) => ({
+        itemId: item.id,
+        itemName: item.name,
+        qty: Math.max(item.neededQty || 1, 1),
+        unit: item.unit,
+        catalogId: null,
+        catalogName: null,
+        matched: false,
+        offers: [],
+        candidates: [],
+      })),
+    )
+  }
+
   const lines: PricedLine[] = []
 
   for (const item of pendingItems) {
@@ -262,6 +288,7 @@ export async function buildLiveBudgetPlans(options: {
         latitude,
         longitude,
         distanceKm,
+        depotIds,
       })
       const bestPick = rankProducts(item.name, products)[0] ?? null
       const ranked = rankProductsForPicker(item.name, products)
@@ -316,11 +343,11 @@ export async function buildLiveBudgetPlans(options: {
 
   return rebuildBudgetFromLines(
     {
-      locationLabel,
+      locationLabel: `${locationLabel} · ${depotIds.length} yakın market`,
       location: { lat: latitude, lng: longitude },
       source: 'marketfiyati',
       disclaimer:
-        'Canlı veriler marketfiyati.org.tr üzerinden alınır. Yanlış eşleşme varsa “Başka ürün seç” ile değiştirebilirsin.',
+        'Fiyatlar seçilen konuma göre yakındaki marketlerden (marketfiyati.org.tr) alınır. Yanlış ürün eşleşirse “Başka ürün seç”.',
     },
     lines,
   )
