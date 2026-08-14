@@ -57,8 +57,6 @@ export function LocationPicker({ prefs, onChange }: Props) {
   const [neighborhoodId, setNeighborhoodId] = useState<number | null>(null)
   const [neighborhoodQuery, setNeighborhoodQuery] = useState('')
   const [street, setStreet] = useState('')
-  const [buildingNo, setBuildingNo] = useState('')
-  const [apartment, setApartment] = useState('')
 
   const [streetHits, setStreetHits] = useState<GeocodeHit[]>([])
   const [resolveHits, setResolveHits] = useState<GeocodeHit[]>([])
@@ -191,8 +189,6 @@ export function LocationPicker({ prefs, onChange }: Props) {
     setNeighborhoodId(null)
     setNeighborhoodQuery('')
     setStreet('')
-    setBuildingNo('')
-    setApartment('')
     setStreetHits([])
     setResolveHits([])
     setProvinceOpen(false)
@@ -228,8 +224,7 @@ export function LocationPicker({ prefs, onChange }: Props) {
       district: district.name,
       neighborhood: mahalle,
       street: streetValue,
-      buildingNo: buildingNo.trim(),
-      apartment: apartment.trim(),
+      buildingNo: '',
     }
   }
 
@@ -254,7 +249,7 @@ export function LocationPicker({ prefs, onChange }: Props) {
       }
       const hits = await searchStructuredAddress(parts, bias)
       if (hits.length === 0) {
-        setErr('Bu adres bulunamadı. Sokak/No’yu kontrol edip tekrar dene.')
+        setErr('Bu adres bulunamadı. Mahalle veya sokak adını kontrol edip tekrar dene.')
         setResolveHits([])
         return
       }
@@ -320,7 +315,7 @@ export function LocationPicker({ prefs, onChange }: Props) {
         </Pressable>
       </View>
       <Text style={styles.hint}>
-        İl → ilçe → mahalle → sokak → no → daire seçerek kaydet. Konumlar önerilir ve bulunur.
+        İl → ilçe → mahalle → sokak seçerek kaydet. Konumlar önerilir ve bulunur.
       </Text>
 
       <View style={styles.chips}>
@@ -539,29 +534,6 @@ export function LocationPicker({ prefs, onChange }: Props) {
                   <Text style={styles.hitLabel}>{hit.label}</Text>
                 </Pressable>
               ))}
-
-              <View style={styles.row2}>
-                <View style={{ flex: 1 }}>
-                  <Text style={styles.fieldLabel}>Kapı no</Text>
-                  <TextInput
-                    value={buildingNo}
-                    onChangeText={setBuildingNo}
-                    placeholder="12"
-                    placeholderTextColor={colors.inkMuted}
-                    style={styles.input}
-                  />
-                </View>
-                <View style={{ flex: 1 }}>
-                  <Text style={styles.fieldLabel}>Daire</Text>
-                  <TextInput
-                    value={apartment}
-                    onChangeText={setApartment}
-                    placeholder="5"
-                    placeholderTextColor={colors.inkMuted}
-                    style={styles.input}
-                  />
-                </View>
-              </View>
 
               {resolveHits.map((hit) => (
                 <Pressable

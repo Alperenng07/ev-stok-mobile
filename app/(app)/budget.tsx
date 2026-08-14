@@ -40,6 +40,7 @@ export default function BudgetScreen() {
   const [error, setError] = useState<string | null>(null)
   const [status, setStatus] = useState<string | null>(null)
   const autoStarted = useRef(false)
+  const lastLocKey = useRef<string | null>(null)
 
   useEffect(() => {
     void locationPrefsStore.load().then((prefs) => {
@@ -47,6 +48,16 @@ export default function BudgetScreen() {
       setPrefsReady(true)
     })
   }, [])
+
+  const locationKey =
+    locPrefs.mode === 'saved' && locPrefs.savedId
+      ? (() => {
+          const place = locPrefs.places.find((p) => p.id === locPrefs.savedId)
+          return place
+            ? `saved:${place.id}:${place.lat.toFixed(5)},${place.lng.toFixed(5)}`
+            : `saved:${locPrefs.savedId}`
+        })()
+      : 'live'
 
   const selected: BudgetPlan | null =
     result?.plans.find((p) => p.id === selectedId) ?? result?.plans[0] ?? null
@@ -99,10 +110,11 @@ export default function BudgetScreen() {
       !loading
     ) {
       autoStarted.current = true
+      lastLocKey.current = locationKey
       void runPlanner()
       router.setParams({ autostart: undefined })
     }
-  }, [params.autostart, loading, runPlanner, router, prefsReady])
+  }, [params.autostart, loading, runPlanner, router, prefsReady, locationKey])
 
   useEffect(() => {
     if (cached && !result) {
@@ -110,6 +122,21 @@ export default function BudgetScreen() {
       setSelectedId(cached.plans[0]?.id ?? null)
     }
   }, [cached, result])
+
+  useEffect(() => {
+    if (!prefsReady) return
+    if (lastLocKey.current === null) {
+      lastLocKey.current = locationKey
+      return
+    }
+    if (lastLocKey.current === locationKey) return
+    lastLocKey.current = locationKey
+    setResult(null)
+    setCache(null)
+    setSelectedId(null)
+    setError(null)
+    if (pending.length > 0) void runPlanner()
+  }, [prefsReady, locationKey, pending.length, runPlanner, setCache])
 
   return (
     <SafeAreaView style={styles.safe} edges={['top']}>
