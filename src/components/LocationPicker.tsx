@@ -1,27 +1,34 @@
-import { useCallback, useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import {
-  Linking,
   Pressable,
+  ScrollView,
   StyleSheet,
   Text,
   TextInput,
   View,
 } from 'react-native'
-import { WebView } from 'react-native-webview'
 import {
-  buildMapPickerHtml,
-  DEFAULT_MAP_CENTER,
+  formatAddressLabel,
   isValidTurkeyCoord,
+  searchStreetSuggestions,
+  searchStructuredAddress,
+  type StructuredAddress,
 } from '../lib/geocode'
-import { googleMapsOpenUrl, resolveMapsLinkToPlace } from '../lib/googleMapsLink'
 import {
   LocationError,
   openAppLocationSettings,
   resolveLiveLocation,
 } from '../lib/location'
 import { locationPrefsStore } from '../lib/locationPrefsStore'
+import {
+  filterByName,
+  listDistricts,
+  listNeighborhoods,
+  listProvinces,
+  type AdminPlace,
+} from '../lib/turkiyeApi'
 import { colors } from '../theme/colors'
-import type { LocationPreference, ShoppingLocation } from '../types/location'
+import type { GeocodeHit, LocationPreference, ShoppingLocation } from '../types/location'
 import { Button } from './ui'
 
 type Props = {
@@ -29,22 +36,135 @@ type Props = {
   onChange: (prefs: LocationPreference) => void
 }
 
-type AddMode = 'google' | 'map' | 'gps'
+type AddMode = 'address' | 'gps'
 
 export function LocationPicker({ prefs, onChange }: Props) {
   const [adding, setAdding] = useState(false)
-  const [addMode, setAddMode] = useState<AddMode>('google')
+  const [addMode, setAddMode] = useState<AddMode>('address')
   const [name, setName] = useState('Ev')
-  const [mapsLink, setMapsLink] = useState('')
   const [busy, setBusy] = useState(false)
   const [msg, setMsg] = useState<string | null>(null)
   const [err, setErr] = useState<string | null>(null)
   const [showPermissionHelp, setShowPermissionHelp] = useState(false)
-  const [mapPin, setMapPin] = useState(DEFAULT_MAP_CENTER)
-  const [mapLabel, setMapLabel] = useState('Haritadan seçilen nokta')
-  const [mapKey, setMapKey] = useState(0)
 
-  const mapHtml = useMemo(() => buildMapPickerHtml(mapPin.lat, mapPin.lng), [mapKey])
+  const [provinces, setProvinces] = useState<AdminPlace[]>([])
+  const [districts, setDistricts] = useState<AdminPlace[]>([])
+  const [neighborhoods, setNeighborhoods] = useState<AdminPlace[]>([])
+  const [listsBusy, setListsBusy] = useState(false)
+
+  const [provinceId, setProvinceId] = useState<number | null>(null)
+  const [districtId, setDistrictId] = useState<number | null>(null)
+  const [neighborhoodId, setNeighborhoodId] = useState<number | null>(null)
+  const [neighborhoodQuery, setNeighborhoodQuery] = useState('')
+  const [street, setStreet] = useState('')
+  const [buildingNo, setBuildingNo] = useState('')
+  const [apartment, setApartment] = useState('')
+
+  const [streetHits, setStreetHits] = useState<GeocodeHit[]>([])
+  const [resolveHits, setResolveHits] = useState<GeocodeHit[]>([])
+  const [provinceOpen, setProvinceOpen] = useState(false)
+  const [districtOpen, setDistrictOpen] = useState(false)
+
+  const province = provinces.find((p) => p.id === provinceId) ?? null
+  const district = districts.find((d) => d.id === districtId) ?? null
+  const neighborhood = neighborhoods.find((n) => n.id === neighborhoodId) ?? null
+
+  const filteredNeighborhoods = useMemo(
+    () => filterByName(neighborhoods, neighborhoodQuery, 50),
+    [neighborhoods, neighborhoodQuery],
+  )
+
+  const bias = useMemo(() => {
+    if (province?.latitude != null && province?.longitude != null) {
+      return { lat: province.latitude, lng: province.longitude }
+    }
+    return undefined
+  }, [province])
+
+  useEffect(() => {
+    let cancelled = false
+    void (async () => {
+      try {
+        const list = await listProvinces()
+        if (!cancelled) setProvinces(list)
+      } catch (e) {
+        if (!cancelled) setErr(e instanceof Error ? e.message : 'İller yüklenemedi')
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  useEffect(() => {
+    if (provinceId == null) {
+      setDistricts([])
+      return
+    }
+    let cancelled = false
+    setListsBusy(true)
+    void (async () => {
+      try {
+        const list = await listDistricts(provinceId)
+        if (!cancelled) setDistricts(list)
+      } catch (e) {
+        if (!cancelled) setErr(e instanceof Error ? e.message : 'İlçeler yüklenemedi')
+      } finally {
+        if (!cancelled) setListsBusy(false)
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [provinceId])
+
+  useEffect(() => {
+    if (districtId == null) {
+      setNeighborhoods([])
+      return
+    }
+    let cancelled = false
+    setListsBusy(true)
+    void (async () => {
+      try {
+        const list = await listNeighborhoods(districtId)
+        if (!cancelled) setNeighborhoods(list)
+      } catch (e) {
+        if (!cancelled) setErr(e instanceof Error ? e.message : 'Mahalleler yüklenemedi')
+      } finally {
+        if (!cancelled) setListsBusy(false)
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [districtId])
+
+  useEffect(() => {
+    if (!province || !district || street.trim().length < 2) {
+      setStreetHits([])
+      return
+    }
+    const timer = setTimeout(() => {
+      void (async () => {
+        try {
+          const hits = await searchStreetSuggestions(
+            street,
+            {
+              province: province.name,
+              district: district.name,
+              neighborhood: neighborhood?.name ?? neighborhoodQuery,
+            },
+            bias,
+          )
+          setStreetHits(hits)
+        } catch {
+          setStreetHits([])
+        }
+      })()
+    }, 350)
+    return () => clearTimeout(timer)
+  }, [street, province, district, neighborhood, neighborhoodQuery, bias])
 
   async function persist(next: LocationPreference) {
     await locationPrefsStore.save(next)
@@ -65,6 +185,20 @@ export function LocationPicker({ prefs, onChange }: Props) {
     void persist({ places, savedId, mode: savedId ? 'saved' : 'live' })
   }
 
+  function resetAddressForm() {
+    setProvinceId(null)
+    setDistrictId(null)
+    setNeighborhoodId(null)
+    setNeighborhoodQuery('')
+    setStreet('')
+    setBuildingNo('')
+    setApartment('')
+    setStreetHits([])
+    setResolveHits([])
+    setProvinceOpen(false)
+    setDistrictOpen(false)
+  }
+
   function addPlace(place: Omit<ShoppingLocation, 'id' | 'createdAt'>) {
     if (!isValidTurkeyCoord(place.lat, place.lng)) {
       setErr('Seçilen nokta Türkiye dışında.')
@@ -77,25 +211,66 @@ export function LocationPicker({ prefs, onChange }: Props) {
     }
     void persist({ mode: 'saved', savedId: next.id, places: [...prefs.places, next] })
     setAdding(false)
-    setMapsLink('')
+    resetAddressForm()
     setMsg(`“${next.name}” kaydedildi ve seçildi.`)
     setErr(null)
     setShowPermissionHelp(false)
   }
 
-  async function saveFromGoogleLink() {
+  function currentParts(streetOverride?: string): StructuredAddress | null {
+    if (!province || !district) return null
+    const mahalle = neighborhood?.name || neighborhoodQuery.trim()
+    if (!mahalle) return null
+    const streetValue = (streetOverride ?? street).trim()
+    if (!streetValue) return null
+    return {
+      province: province.name,
+      district: district.name,
+      neighborhood: mahalle,
+      street: streetValue,
+      buildingNo: buildingNo.trim(),
+      apartment: apartment.trim(),
+    }
+  }
+
+  async function findAndSave(hit?: GeocodeHit) {
+    const parts = currentParts(hit?.name)
+    if (!parts) {
+      setErr('İl, ilçe, mahalle ve sokak seç/yaz.')
+      return
+    }
     setBusy(true)
     setErr(null)
+    setShowPermissionHelp(false)
     try {
-      const place = await resolveMapsLinkToPlace(mapsLink)
-      addPlace({
-        name: name.trim() || 'Ev',
-        lat: place.lat,
-        lng: place.lng,
-        label: place.label,
-      })
+      if (hit) {
+        addPlace({
+          name: name.trim() || 'Ev',
+          lat: hit.lat,
+          lng: hit.lng,
+          label: formatAddressLabel(parts),
+        })
+        return
+      }
+      const hits = await searchStructuredAddress(parts, bias)
+      if (hits.length === 0) {
+        setErr('Bu adres bulunamadı. Sokak/No’yu kontrol edip tekrar dene.')
+        setResolveHits([])
+        return
+      }
+      if (hits.length === 1) {
+        addPlace({
+          name: name.trim() || 'Ev',
+          lat: hits[0].lat,
+          lng: hits[0].lng,
+          label: formatAddressLabel(parts),
+        })
+        return
+      }
+      setResolveHits(hits)
+      setMsg('Birden fazla sonuç var — listeden doğru olanı seç.')
     } catch (e) {
-      setErr(e instanceof Error ? e.message : 'Link okunamadı')
+      setErr(e instanceof Error ? e.message : 'Adres bulunamadı')
     } finally {
       setBusy(false)
     }
@@ -123,28 +298,10 @@ export function LocationPicker({ prefs, onChange }: Props) {
     }
   }
 
-  function saveMapPin() {
-    addPlace({
-      name: name.trim() || 'Harita konumu',
-      lat: mapPin.lat,
-      lng: mapPin.lng,
-      label: mapLabel,
-    })
-  }
-
-  const onMapMessage = useCallback((raw: string) => {
-    try {
-      const data = JSON.parse(raw) as { type?: string; lat?: number; lng?: number }
-      if (data.type !== 'pick') return
-      if (!Number.isFinite(data.lat) || !Number.isFinite(data.lng)) return
-      setMapPin({ lat: data.lat!, lng: data.lng! })
-      setMapLabel(`${data.lat!.toFixed(5)}, ${data.lng!.toFixed(5)}`)
-    } catch {
-      /* ignore */
-    }
-  }, [])
-
   const selected = prefs.places.find((p) => p.id === prefs.savedId)
+  const canResolve = Boolean(
+    province && district && (neighborhood || neighborhoodQuery.trim()) && street.trim(),
+  )
 
   return (
     <View style={styles.wrap}>
@@ -156,13 +313,14 @@ export function LocationPicker({ prefs, onChange }: Props) {
             setErr(null)
             setMsg(null)
             setShowPermissionHelp(false)
+            setResolveHits([])
           }}
         >
           <Text style={styles.addLink}>{adding ? 'Kapat' : '+ Konum ekle'}</Text>
         </Pressable>
       </View>
       <Text style={styles.hint}>
-        En güvenlisi: Google Maps’te pin koy → Paylaş → linki yapıştır.
+        İl → ilçe → mahalle → sokak → no → daire seçerek kaydet. Konumlar önerilir ve bulunur.
       </Text>
 
       <View style={styles.chips}>
@@ -234,11 +392,12 @@ export function LocationPicker({ prefs, onChange }: Props) {
           />
 
           <View style={styles.chips}>
-            {([
-              ['google', 'Google Maps'],
-              ['map', 'Harita'],
-              ['gps', 'Anlık GPS'],
-            ] as const).map(([id, label]) => (
+            {(
+              [
+                ['address', 'Adres seç'],
+                ['gps', 'Anlık GPS'],
+              ] as const
+            ).map(([id, label]) => (
               <Pressable
                 key={id}
                 onPress={() => setAddMode(id)}
@@ -251,56 +410,177 @@ export function LocationPicker({ prefs, onChange }: Props) {
             ))}
           </View>
 
-          {addMode === 'google' ? (
+          {addMode === 'address' ? (
             <>
-              <Text style={styles.hint}>
-                Maps’te pin koy → Paylaş → bağlantıyı kopyala → yapıştır. Kısa link olursa uygulamada
-                açıp uzun adresi kopyala.
-              </Text>
-              <Button
-                label="Google Maps’te pin koy"
-                variant="secondary"
-                onPress={() => void Linking.openURL(googleMapsOpenUrl())}
-              />
-              <Text style={styles.fieldLabel}>Google Maps linki</Text>
-              <TextInput
-                value={mapsLink}
-                onChangeText={setMapsLink}
-                placeholder="https://www.google.com/maps/…/@41.01,28.97…"
-                placeholderTextColor={colors.inkMuted}
-                style={[styles.input, styles.textarea]}
-                multiline
-                autoCapitalize="none"
-                autoCorrect={false}
-              />
-              <Button
-                label={busy ? 'Okunuyor…' : 'Linkten kaydet'}
-                onPress={() => void saveFromGoogleLink()}
-                loading={busy}
-                disabled={!mapsLink.trim()}
-              />
-            </>
-          ) : null}
+              <Text style={styles.fieldLabel}>İl</Text>
+              <Pressable
+                style={styles.input}
+                onPress={() => {
+                  setProvinceOpen((v) => !v)
+                  setDistrictOpen(false)
+                }}
+              >
+                <Text style={province ? styles.valueText : styles.placeholder}>
+                  {province?.name ?? 'İl seç…'}
+                </Text>
+              </Pressable>
+              {provinceOpen ? (
+                <ScrollView style={styles.listBox} nestedScrollEnabled>
+                  {provinces.map((p) => (
+                    <Pressable
+                      key={p.id}
+                      style={styles.listItem}
+                      onPress={() => {
+                        setProvinceId(p.id)
+                        setDistrictId(null)
+                        setNeighborhoodId(null)
+                        setNeighborhoodQuery('')
+                        setProvinceOpen(false)
+                        setStreetHits([])
+                        setResolveHits([])
+                      }}
+                    >
+                      <Text style={styles.hitName}>{p.name}</Text>
+                    </Pressable>
+                  ))}
+                </ScrollView>
+              ) : null}
 
-          {addMode === 'map' ? (
-            <>
-              <Text style={styles.hint}>
-                OpenStreetMap haritası (ücretsiz). Google pin için Google Maps sekmesi.
-              </Text>
-              <View style={styles.mapWrap}>
-                <WebView
-                  key={mapKey}
-                  originWhitelist={['*']}
-                  source={{ html: mapHtml }}
-                  style={styles.map}
-                  onMessage={(e) => onMapMessage(e.nativeEvent.data)}
-                  javaScriptEnabled
-                  domStorageEnabled
-                  setSupportMultipleWindows={false}
-                />
+              <Text style={styles.fieldLabel}>İlçe</Text>
+              <Pressable
+                style={[styles.input, provinceId == null && styles.inputDisabled]}
+                disabled={provinceId == null}
+                onPress={() => {
+                  if (provinceId == null) return
+                  setDistrictOpen((v) => !v)
+                  setProvinceOpen(false)
+                }}
+              >
+                <Text style={district ? styles.valueText : styles.placeholder}>
+                  {district?.name ?? (provinceId == null ? 'Önce il seç' : 'İlçe seç…')}
+                </Text>
+              </Pressable>
+              {districtOpen ? (
+                <ScrollView style={styles.listBox} nestedScrollEnabled>
+                  {districts.map((d) => (
+                    <Pressable
+                      key={d.id}
+                      style={styles.listItem}
+                      onPress={() => {
+                        setDistrictId(d.id)
+                        setNeighborhoodId(null)
+                        setNeighborhoodQuery('')
+                        setDistrictOpen(false)
+                        setStreetHits([])
+                        setResolveHits([])
+                      }}
+                    >
+                      <Text style={styles.hitName}>{d.name}</Text>
+                    </Pressable>
+                  ))}
+                </ScrollView>
+              ) : null}
+
+              <Text style={styles.fieldLabel}>Mahalle</Text>
+              <TextInput
+                value={neighborhoodQuery}
+                editable={districtId != null}
+                onChangeText={(t) => {
+                  setNeighborhoodQuery(t)
+                  setNeighborhoodId(null)
+                  setResolveHits([])
+                }}
+                placeholder={districtId == null ? 'Önce ilçe seç' : 'Mahalle ara / yaz'}
+                placeholderTextColor={colors.inkMuted}
+                style={styles.input}
+              />
+              {districtId != null && filteredNeighborhoods.length > 0 ? (
+                <ScrollView style={styles.listBox} nestedScrollEnabled>
+                  {filteredNeighborhoods.map((n) => (
+                    <Pressable
+                      key={n.id}
+                      style={[styles.listItem, neighborhoodId === n.id && styles.listItemActive]}
+                      onPress={() => {
+                        setNeighborhoodId(n.id)
+                        setNeighborhoodQuery(n.name)
+                        setResolveHits([])
+                      }}
+                    >
+                      <Text style={styles.hitName}>{n.name}</Text>
+                      <Text style={styles.hitLabel}>Mahalle</Text>
+                    </Pressable>
+                  ))}
+                </ScrollView>
+              ) : null}
+
+              <Text style={styles.fieldLabel}>Sokak / Cadde</Text>
+              <TextInput
+                value={street}
+                editable={Boolean(province && district)}
+                onChangeText={(t) => {
+                  setStreet(t)
+                  setResolveHits([])
+                }}
+                placeholder="Örn. Atatürk Cad. / Gül Sk."
+                placeholderTextColor={colors.inkMuted}
+                style={styles.input}
+              />
+              {streetHits.map((hit) => (
+                <Pressable
+                  key={hit.id}
+                  style={styles.listItem}
+                  onPress={() => {
+                    setStreet(hit.name)
+                    setStreetHits([])
+                    void findAndSave(hit)
+                  }}
+                >
+                  <Text style={styles.hitName}>{hit.name}</Text>
+                  <Text style={styles.hitLabel}>{hit.label}</Text>
+                </Pressable>
+              ))}
+
+              <View style={styles.row2}>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.fieldLabel}>Kapı no</Text>
+                  <TextInput
+                    value={buildingNo}
+                    onChangeText={setBuildingNo}
+                    placeholder="12"
+                    placeholderTextColor={colors.inkMuted}
+                    style={styles.input}
+                  />
+                </View>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.fieldLabel}>Daire</Text>
+                  <TextInput
+                    value={apartment}
+                    onChangeText={setApartment}
+                    placeholder="5"
+                    placeholderTextColor={colors.inkMuted}
+                    style={styles.input}
+                  />
+                </View>
               </View>
-              <Text style={styles.selected}>{mapLabel}</Text>
-              <Button label="Bu pin’i kaydet" onPress={saveMapPin} />
+
+              {resolveHits.map((hit) => (
+                <Pressable
+                  key={hit.id}
+                  style={styles.listItem}
+                  onPress={() => void findAndSave(hit)}
+                >
+                  <Text style={styles.hitName}>{hit.name}</Text>
+                  <Text style={styles.hitLabel}>{hit.label}</Text>
+                </Pressable>
+              ))}
+
+              <Button
+                label={busy ? 'Bulunuyor…' : 'Konumu bul ve kaydet'}
+                onPress={() => void findAndSave()}
+                loading={busy}
+                disabled={!canResolve}
+              />
+              {listsBusy ? <Text style={styles.hint}>Listeler yükleniyor…</Text> : null}
             </>
           ) : null}
 
@@ -402,15 +682,24 @@ const styles = StyleSheet.create({
     color: colors.ink,
     backgroundColor: colors.bg,
   },
-  textarea: { minHeight: 78, textAlignVertical: 'top' },
-  mapWrap: {
-    height: 260,
-    borderRadius: 12,
-    overflow: 'hidden',
+  inputDisabled: { opacity: 0.55 },
+  valueText: { color: colors.ink, fontWeight: '600' },
+  placeholder: { color: colors.inkMuted },
+  listBox: {
+    maxHeight: 180,
     borderWidth: 1,
     borderColor: colors.border,
+    borderRadius: 10,
+    backgroundColor: colors.bg,
   },
-  map: { flex: 1, backgroundColor: '#e8ece5' },
+  listItem: {
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: colors.border,
+  },
+  listItemActive: { backgroundColor: '#EAF2EE' },
+  row2: { flexDirection: 'row', gap: 10 },
   hitName: { fontWeight: '700', color: colors.ink },
   hitLabel: { marginTop: 2, color: colors.inkMuted, fontSize: 12 },
   manageRow: {

@@ -46,6 +46,8 @@ export type StructuredAddress = {
   street: string
   /** Kapı no */
   buildingNo: string
+  /** Daire (etiket için; geocode’a etkisi yok) */
+  apartment?: string
 }
 
 const TR_BIAS = { lat: 39.0, lon: 35.0 }
@@ -149,6 +151,62 @@ function composeAddressQuery(parts: StructuredAddress): string {
     .join(' ')
 }
 
+export function formatAddressLabel(parts: StructuredAddress): string {
+  const streetLine = [
+    parts.street.trim(),
+    parts.buildingNo.trim() ? `No:${parts.buildingNo.trim()}` : '',
+    parts.apartment?.trim() ? `D:${parts.apartment.trim()}` : '',
+  ]
+    .filter(Boolean)
+    .join(' ')
+  return [streetLine, parts.neighborhood.trim(), parts.district.trim(), parts.province.trim()]
+    .filter(Boolean)
+    .join(', ')
+}
+
+/** Sokak önerileri: il/ilçe/mahalle bağlamında Photon araması. */
+export async function searchStreetSuggestions(
+  streetQuery: string,
+  context: Pick<StructuredAddress, 'province' | 'district' | 'neighborhood'>,
+  bias?: { lat: number; lng: number },
+): Promise<GeocodeHit[]> {
+  const street = streetQuery.trim()
+  if (street.length < 2) return []
+  if (!context.province.trim() || !context.district.trim()) return []
+
+  const results: GeocodeHit[] = []
+  const pushUnique = (list: GeocodeHit[]) => {
+    for (const hit of list) {
+      if (!results.some((r) => r.id === hit.id)) results.push(hit)
+    }
+  }
+
+  try {
+    pushUnique(
+      await searchPhotonStructured({
+        province: context.province,
+        district: context.district,
+        neighborhood: context.neighborhood,
+        street,
+        buildingNo: '',
+      }),
+    )
+  } catch {
+    /* continue */
+  }
+
+  const free = [street, context.neighborhood, context.district, context.province]
+    .filter(Boolean)
+    .join(' ')
+  try {
+    pushUnique(await searchPhotonFree(free, bias))
+  } catch {
+    /* continue */
+  }
+
+  return results.slice(0, 8)
+}
+
 /** İl / ilçe / mahalle / sokak alanlarıyla konum bul. */
 export async function searchStructuredAddress(
   parts: StructuredAddress,
@@ -248,51 +306,3 @@ export function isValidTurkeyCoord(lat: number, lng: number): boolean {
 }
 
 export const DEFAULT_MAP_CENTER = { lat: 41.0082, lng: 28.9784 }
-
-/** Mobil WebView için Leaflet HTML (web artık native Leaflet kullanır). */
-export function buildMapPickerHtml(lat: number, lng: number, zoom = 15): string {
-  const safeLat = Number.isFinite(lat) ? lat : DEFAULT_MAP_CENTER.lat
-  const safeLng = Number.isFinite(lng) ? lng : DEFAULT_MAP_CENTER.lng
-  return `<!DOCTYPE html>
-<html lang="tr">
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
-  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
-  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-  <style>
-    html, body, #map { height: 100%; margin: 0; background: #e8ece5; }
-    .hint {
-      position: absolute; z-index: 1000; left: 10px; right: 10px; top: 10px;
-      background: rgba(255,252,247,0.95); border-radius: 10px; padding: 8px 10px;
-      font: 600 12px/1.35 system-ui, sans-serif; color: #1e2a22;
-      box-shadow: 0 4px 14px rgba(0,0,0,0.12);
-    }
-  </style>
-</head>
-<body>
-  <div class="hint">Haritaya dokun veya iğneyi sürükle</div>
-  <div id="map"></div>
-  <script>
-    const start = { lat: ${safeLat}, lng: ${safeLng} };
-    const map = L.map('map', { zoomControl: true }).setView([start.lat, start.lng], ${zoom});
-    L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
-      maxZoom: 19,
-      attribution: '&copy; OpenStreetMap'
-    }).addTo(map);
-    const marker = L.marker([start.lat, start.lng], { draggable: true }).addTo(map);
-    function emit(ll) {
-      const payload = JSON.stringify({ type: 'pick', lat: ll.lat, lng: ll.lng });
-      if (window.ReactNativeWebView) window.ReactNativeWebView.postMessage(payload);
-      else window.parent.postMessage(payload, '*');
-    }
-    map.on('click', function (e) {
-      marker.setLatLng(e.latlng);
-      emit(e.latlng);
-    });
-    marker.on('dragend', function () { emit(marker.getLatLng()); });
-    setTimeout(function () { map.invalidateSize(); emit(marker.getLatLng()); }, 250);
-  </script>
-</body>
-</html>`
-}
