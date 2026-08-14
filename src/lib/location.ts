@@ -10,6 +10,17 @@ export type UserLocation = {
   accuracyM: number | null
 }
 
+/** Bütçe cache’ini konuma bağlamak için kararlı anahtar. */
+export function budgetLocationKey(prefs: LocationPreference): string {
+  if (prefs.mode === 'saved' && prefs.savedId) {
+    const place = prefs.places.find((p) => p.id === prefs.savedId)
+    return place
+      ? `saved:${place.id}:${place.lat.toFixed(5)},${place.lng.toFixed(5)}`
+      : `saved:${prefs.savedId}`
+  }
+  return 'live'
+}
+
 export type LocationErrorCode =
   | 'permission'
   | 'unavailable'

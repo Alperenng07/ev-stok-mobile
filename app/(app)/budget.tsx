@@ -15,7 +15,7 @@ import { useBudgetCache } from '../../src/context/BudgetCacheContext'
 import { useItems } from '../../src/context/ItemsContext'
 import { applyCatalogChoice, buildLiveBudgetPlans, formatTry } from '../../src/lib/budgetPlanner'
 import { chainById } from '../../src/lib/chains'
-import { resolveBudgetLocation } from '../../src/lib/location'
+import { budgetLocationKey, resolveBudgetLocation } from '../../src/lib/location'
 import { locationPrefsStore } from '../../src/lib/locationPrefsStore'
 import { colors } from '../../src/theme/colors'
 import type { BudgetPlan, BudgetResult } from '../../src/types/budget'
@@ -25,7 +25,7 @@ export default function BudgetScreen() {
   const router = useRouter()
   const params = useLocalSearchParams<{ autostart?: string }>()
   const { items } = useItems()
-  const { result: cached, setResult: setCache, hasCache, calculatedAt } = useBudgetCache()
+  const { result: cached, setResult: setCache, hasCacheFor, calculatedAt } = useBudgetCache()
   const pending = useMemo(() => items.filter((i) => !i.purchased), [items])
 
   const [locPrefs, setLocPrefs] = useState<LocationPreference>({
@@ -35,8 +35,8 @@ export default function BudgetScreen() {
   })
   const [prefsReady, setPrefsReady] = useState(false)
   const [loading, setLoading] = useState(false)
-  const [result, setResult] = useState<BudgetResult | null>(cached)
-  const [selectedId, setSelectedId] = useState<string | null>(cached?.plans[0]?.id ?? null)
+  const [result, setResult] = useState<BudgetResult | null>(null)
+  const [selectedId, setSelectedId] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [status, setStatus] = useState<string | null>(null)
   const [pickItemId, setPickItemId] = useState<string | null>(null)
@@ -50,25 +50,25 @@ export default function BudgetScreen() {
     })
   }, [])
 
-  const locationKey =
-    locPrefs.mode === 'saved' && locPrefs.savedId
-      ? (() => {
-          const place = locPrefs.places.find((p) => p.id === locPrefs.savedId)
-          return place
-            ? `saved:${place.id}:${place.lat.toFixed(5)},${place.lng.toFixed(5)}`
-            : `saved:${locPrefs.savedId}`
-        })()
-      : 'live'
+  const locationKey = budgetLocationKey(locPrefs)
+  const hasCache = hasCacheFor(locationKey)
+  const activeResult = result?.locationKey === locationKey ? result : null
 
   const selected: BudgetPlan | null =
-    result?.plans.find((p) => p.id === selectedId) ?? result?.plans[0] ?? null
+    activeResult?.plans.find((p) => p.id === selectedId) ?? activeResult?.plans[0] ?? null
 
   const runPlanner = useCallback(async (prefsOverride?: LocationPreference) => {
     const activePrefs = prefsOverride ?? locPrefs
+    const key = budgetLocationKey(activePrefs)
+    lastLocKey.current = key
+
+    setResult(null)
+    setCache(null)
+    setSelectedId(null)
+    setPickItemId(null)
+
     if (pending.length === 0) {
       setError('Alınacak ürün yok. Önce listeye ürün ekle.')
-      setResult(null)
-      setCache(null)
       return
     }
     setLoading(true)
@@ -86,6 +86,7 @@ export default function BudgetScreen() {
         latitude: loc.lat,
         longitude: loc.lng,
         locationLabel: loc.label,
+        locationKey: key,
         distanceKm: 8,
       })
       setResult(next)
@@ -97,6 +98,7 @@ export default function BudgetScreen() {
       }
     } catch (err) {
       setResult(null)
+      setCache(null)
       setError(err instanceof Error ? err.message : 'Plan oluşturulamadı')
       setStatus(null)
     } finally {
@@ -119,13 +121,12 @@ export default function BudgetScreen() {
   }, [params.autostart, loading, runPlanner, router, prefsReady, locationKey])
 
   useEffect(() => {
-    if (cached && !result) {
+    if (cached && !result && cached.locationKey === locationKey) {
       setResult(cached)
       setSelectedId(cached.plans[0]?.id ?? null)
     }
-  }, [cached, result])
+  }, [cached, result, locationKey])
 
-  // Konum değişince eski cache’i temizle (hesap seçim/buton ile tetiklenir)
   useEffect(() => {
     if (!prefsReady) return
     if (lastLocKey.current === null) {
@@ -137,12 +138,14 @@ export default function BudgetScreen() {
     setResult(null)
     setCache(null)
     setSelectedId(null)
+    setPickItemId(null)
     setError(null)
+    setStatus(null)
   }, [prefsReady, locationKey, setCache])
 
   function chooseCatalog(itemId: string, catalogId: string) {
-    if (!result) return
-    const next = applyCatalogChoice(result, itemId, catalogId)
+    if (!activeResult) return
+    const next = applyCatalogChoice(activeResult, itemId, catalogId)
     setResult(next)
     setCache(next)
     setSelectedId((prev) => next.plans.find((p) => p.id === prev)?.id ?? next.plans[0]?.id ?? null)
@@ -162,15 +165,7 @@ export default function BudgetScreen() {
           prefs={locPrefs}
           onChange={setLocPrefs}
           onUseLocation={(nextPrefs) => {
-            const place =
-              nextPrefs.mode === 'saved' && nextPrefs.savedId
-                ? nextPrefs.places.find((p) => p.id === nextPrefs.savedId)
-                : null
-            lastLocKey.current = place
-              ? `saved:${place.id}:${place.lat.toFixed(5)},${place.lng.toFixed(5)}`
-              : nextPrefs.mode === 'saved' && nextPrefs.savedId
-                ? `saved:${nextPrefs.savedId}`
-                : 'live'
+            lastLocKey.current = budgetLocationKey(nextPrefs)
             setLocPrefs(nextPrefs)
             void runPlanner(nextPrefs)
           }}
@@ -203,19 +198,19 @@ export default function BudgetScreen() {
           </View>
         ) : null}
 
-        {result ? (
+        {activeResult ? (
           <ScrollView contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
             <Banner
-              text={`Konum: ${result.locationLabel} (${result.location.lat.toFixed(4)}, ${result.location.lng.toFixed(4)})`}
+              text={`Konum: ${activeResult.locationLabel} (${activeResult.location.lat.toFixed(4)}, ${activeResult.location.lng.toFixed(4)})`}
               tone="ok"
             />
-            <Banner text={result.disclaimer} />
+            <Banner text={activeResult.disclaimer} />
 
             <Text style={styles.section}>Ürün eşleşmeleri</Text>
             <Text style={styles.matchHint}>
               Yanlışsa “Başka ürün seç” ile Nutella / Yumoş vb. yerine doğru ürünü seç.
             </Text>
-            {result.lines.map((line) => {
+            {activeResult.lines.map((line) => {
               const candidates = line.candidates ?? []
               const open = pickItemId === line.itemId
               const alts = candidates.filter((c) => c.catalogId !== line.catalogId)
@@ -266,21 +261,21 @@ export default function BudgetScreen() {
               )
             })}
 
-            {result.potentialSaving > 0 ? (
+            {activeResult.potentialSaving > 0 ? (
               <View style={styles.savingCard}>
                 <Text style={styles.savingLabel}>Potansiyel tasarruf</Text>
                 <Text style={styles.savingValue}>
-                  {formatTry(result.potentialSaving)} kar edebilirsin
+                  {formatTry(activeResult.potentialSaving)} kar edebilirsin
                 </Text>
                 <Text style={styles.savingHint}>
-                  En pahalı tek-zincire göre ({formatTry(result.worstSingleTotal)}) en ucuz plan (
-                  {formatTry(result.bestTotal)}).
+                  En pahalı tek-zincire göre ({formatTry(activeResult.worstSingleTotal)}) en ucuz plan (
+                  {formatTry(activeResult.bestTotal)}).
                 </Text>
               </View>
             ) : null}
 
             <Text style={styles.section}>Önerilen planlar</Text>
-            {result.plans.map((plan) => {
+            {activeResult.plans.map((plan) => {
               const active = selected?.id === plan.id
               const chainColor = plan.chainId ? chainById(plan.chainId).color : colors.brand
               return (

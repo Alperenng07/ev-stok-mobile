@@ -95,6 +95,8 @@ export type BudgetPlan = {
 }
 
 export type BudgetResult = {
+  /** Hangi alışveriş konumuna ait (Ev/İş/anlık). Değişince eski sonuç kullanılmaz. */
+  locationKey: string
   locationLabel: string
   location: { lat: number; lng: number }
   stores: NearbyStore[]

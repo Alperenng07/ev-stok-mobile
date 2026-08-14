@@ -153,7 +153,7 @@ function buildPlan(options: {
 
 /** Mevcut satırlardan planları yeniden kur (ürün seçimi değişince). */
 export function rebuildBudgetFromLines(
-  base: Pick<BudgetResult, 'locationLabel' | 'location' | 'disclaimer' | 'source'>,
+  base: Pick<BudgetResult, 'locationKey' | 'locationLabel' | 'location' | 'disclaimer' | 'source'>,
   lines: PricedLine[],
 ): BudgetResult {
   const matched = lines.filter((l) => l.matched && l.offers.length > 0)
@@ -207,6 +207,7 @@ export function rebuildBudgetFromLines(
   const potentialSaving = round2(Math.max(0, worstSingleTotal - bestTotal))
 
   return {
+    locationKey: base.locationKey,
     locationLabel: base.locationLabel,
     location: base.location,
     stores: collectStores(lines),
@@ -248,9 +249,10 @@ export async function buildLiveBudgetPlans(options: {
   latitude: number
   longitude: number
   locationLabel: string
+  locationKey: string
   distanceKm?: number
 }): Promise<BudgetResult> {
-  const { pendingItems, latitude, longitude, locationLabel } = options
+  const { pendingItems, latitude, longitude, locationLabel, locationKey } = options
   const distanceKm = options.distanceKm ?? 8
 
   const nearest = await fetchNearestDepots({ latitude, longitude, distanceKm })
@@ -258,6 +260,7 @@ export async function buildLiveBudgetPlans(options: {
   if (depotIds.length === 0) {
     return rebuildBudgetFromLines(
       {
+        locationKey,
         locationLabel,
         location: { lat: latitude, lng: longitude },
         source: 'marketfiyati',
@@ -343,6 +346,7 @@ export async function buildLiveBudgetPlans(options: {
 
   return rebuildBudgetFromLines(
     {
+      locationKey,
       locationLabel: `${locationLabel} · ${depotIds.length} yakın market`,
       location: { lat: latitude, lng: longitude },
       source: 'marketfiyati',

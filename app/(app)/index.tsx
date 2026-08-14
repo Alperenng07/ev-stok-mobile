@@ -1,5 +1,5 @@
-import { useRouter } from 'expo-router'
-import { useState } from 'react'
+import { useFocusEffect, useRouter } from 'expo-router'
+import { useCallback, useState } from 'react'
 import {
   FlatList,
   Pressable,
@@ -18,6 +18,8 @@ import { useFamily } from '../../src/context/FamilyContext'
 import { useItems } from '../../src/context/ItemsContext'
 import { useSavings } from '../../src/context/SavingsContext'
 import { formatTry } from '../../src/lib/budgetPlanner'
+import { budgetLocationKey } from '../../src/lib/location'
+import { locationPrefsStore } from '../../src/lib/locationPrefsStore'
 import { computePurchaseSavings } from '../../src/lib/purchaseSavings'
 import { colors } from '../../src/theme/colors'
 import type { FilterId, StockItem } from '../../src/types'
@@ -32,8 +34,19 @@ const FILTERS: { id: FilterId; label: string }[] = [
 export default function ListScreen() {
   const router = useRouter()
   const { family } = useFamily()
-  const { hasCache, getLineForItem, result: budgetResult } = useBudgetCache()
+  const { hasCacheFor, getLineForItemAt, result: budgetResult } = useBudgetCache()
   const { addPurchaseSavings } = useSavings()
+  const [locationKey, setLocationKey] = useState('live')
+  const hasCache = hasCacheFor(locationKey)
+  const getLineForItem = (itemId: string) => getLineForItemAt(itemId, locationKey)
+
+  useFocusEffect(
+    useCallback(() => {
+      void locationPrefsStore.load().then((prefs) => {
+        setLocationKey(budgetLocationKey(prefs))
+      })
+    }, []),
+  )
   const {
     filtered,
     filter,
