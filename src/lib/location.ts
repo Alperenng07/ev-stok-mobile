@@ -1,4 +1,5 @@
 import * as Location from 'expo-location'
+import { Linking, Platform } from 'react-native'
 import type { LocationPreference } from '../types/location'
 import { isValidTurkeyCoord } from './geocode'
 
@@ -9,23 +10,35 @@ export type UserLocation = {
   accuracyM: number | null
 }
 
+export type LocationErrorCode =
+  | 'permission'
+  | 'unavailable'
+  | 'timeout'
+  | 'unsupported'
+  | 'other'
+
 export class LocationError extends Error {
-  constructor(message: string) {
+  code: LocationErrorCode
+
+  constructor(message: string, code: LocationErrorCode = 'other') {
     super(message)
     this.name = 'LocationError'
+    this.code = code
   }
 }
 
-/** Kullanıcının anlık GPS konumunu ister. İzin yoksa hata fırlatır. */
 export async function resolveLiveLocation(): Promise<UserLocation> {
   const services = await Location.hasServicesEnabledAsync()
   if (!services) {
-    throw new LocationError('Konum servisleri kapalı. Lütfen cihaz konumunu aç.')
+    throw new LocationError('Konum servisleri kapalı. Lütfen cihaz konumunu aç.', 'unavailable')
   }
 
   const { status } = await Location.requestForegroundPermissionsAsync()
   if (status !== 'granted') {
-    throw new LocationError('Konum izni gerekli. Ayarlardan izin verip tekrar dene.')
+    throw new LocationError(
+      'Konum izni kapalı. Ayarlardan bu uygulamaya konum izni ver.',
+      'permission',
+    )
   }
 
   const pos = await Location.getCurrentPositionAsync({
@@ -35,7 +48,10 @@ export async function resolveLiveLocation(): Promise<UserLocation> {
   const lat = pos.coords.latitude
   const lng = pos.coords.longitude
   if (!isValidTurkeyCoord(lat, lng)) {
-    throw new LocationError('Konum Türkiye dışında görünüyor. Kayıtlı bir alışveriş konumu seç.')
+    throw new LocationError(
+      'Konum Türkiye dışında görünüyor. Kayıtlı Google Maps konumu seç.',
+      'other',
+    )
   }
   const accuracyM = pos.coords.accuracy ?? null
 
@@ -48,23 +64,22 @@ export async function resolveLiveLocation(): Promise<UserLocation> {
       label = parts.filter((v, i, arr) => arr.indexOf(v) === i).slice(0, 3).join(', ') || label
     }
   } catch {
-    // reverse geocode opsiyonel
+    /* optional */
   }
 
   return { lat, lng, label, accuracyM }
 }
 
-/** Bütçe hesabı için seçili kaynağı çözümler (anlık veya kayıtlı). */
 export async function resolveBudgetLocation(
   prefs: LocationPreference,
 ): Promise<UserLocation> {
   if (prefs.mode === 'saved' && prefs.savedId) {
     const place = prefs.places.find((p) => p.id === prefs.savedId)
     if (!place) {
-      throw new LocationError('Kayıtlı konum bulunamadı. Yeniden seç veya anlık konum kullan.')
+      throw new LocationError('Kayıtlı konum bulunamadı.')
     }
     if (!isValidTurkeyCoord(place.lat, place.lng)) {
-      throw new LocationError('Kayıtlı konum geçersiz. Haritadan veya açık adresle yeniden ekle.')
+      throw new LocationError('Kayıtlı konum geçersiz. Google Maps linkiyle yeniden ekle.')
     }
     return {
       lat: place.lat,
@@ -74,6 +89,17 @@ export async function resolveBudgetLocation(
     }
   }
   return resolveLiveLocation()
+}
+
+/** Uygulama / sistem konum ayarlarını aç. */
+export async function openAppLocationSettings(): Promise<void> {
+  try {
+    await Linking.openSettings()
+  } catch {
+    if (Platform.OS === 'android') {
+      await Linking.openURL('app-settings:')
+    }
+  }
 }
 
 export function haversineKm(aLat: number, aLng: number, bLat: number, bLng: number): number {
