@@ -13,7 +13,7 @@ import { LocationPicker } from '../../src/components/LocationPicker'
 import { Banner, Button, Screen, Subtitle, Title } from '../../src/components/ui'
 import { useBudgetCache } from '../../src/context/BudgetCacheContext'
 import { useItems } from '../../src/context/ItemsContext'
-import { buildLiveBudgetPlans, formatTry } from '../../src/lib/budgetPlanner'
+import { applyCatalogChoice, buildLiveBudgetPlans, formatTry } from '../../src/lib/budgetPlanner'
 import { chainById } from '../../src/lib/chains'
 import { resolveBudgetLocation } from '../../src/lib/location'
 import { locationPrefsStore } from '../../src/lib/locationPrefsStore'
@@ -39,6 +39,7 @@ export default function BudgetScreen() {
   const [selectedId, setSelectedId] = useState<string | null>(cached?.plans[0]?.id ?? null)
   const [error, setError] = useState<string | null>(null)
   const [status, setStatus] = useState<string | null>(null)
+  const [pickItemId, setPickItemId] = useState<string | null>(null)
   const autoStarted = useRef(false)
   const lastLocKey = useRef<string | null>(null)
 
@@ -138,6 +139,15 @@ export default function BudgetScreen() {
     if (pending.length > 0) void runPlanner()
   }, [prefsReady, locationKey, pending.length, runPlanner, setCache])
 
+  function chooseCatalog(itemId: string, catalogId: string) {
+    if (!result) return
+    const next = applyCatalogChoice(result, itemId, catalogId)
+    setResult(next)
+    setCache(next)
+    setSelectedId((prev) => next.plans.find((p) => p.id === prev)?.id ?? next.plans[0]?.id ?? null)
+    setPickItemId(null)
+  }
+
   return (
     <SafeAreaView style={styles.safe} edges={['top']}>
       <Screen style={styles.screen}>
@@ -183,6 +193,61 @@ export default function BudgetScreen() {
               tone="ok"
             />
             <Banner text={result.disclaimer} />
+
+            <Text style={styles.section}>Ürün eşleşmeleri</Text>
+            <Text style={styles.matchHint}>
+              Yanlışsa “Başka ürün seç” ile Nutella / Yumoş vb. yerine doğru ürünü seç.
+            </Text>
+            {result.lines.map((line) => {
+              const candidates = line.candidates ?? []
+              const open = pickItemId === line.itemId
+              const alts = candidates.filter((c) => c.catalogId !== line.catalogId)
+              return (
+                <View key={`match-${line.itemId}`} style={styles.matchCard}>
+                  <View style={styles.matchHead}>
+                    <View style={{ flex: 1 }}>
+                      <Text style={styles.lineName}>{line.itemName}</Text>
+                      <Text style={styles.lineMatch}>
+                        {line.matched && line.catalogName
+                          ? `Eşleşen: ${line.catalogName}`
+                          : 'Eşleşme yok'}
+                        {line.offers[0]
+                          ? ` · en ucuz ${formatTry(line.offers[0].unitPrice)}`
+                          : ''}
+                      </Text>
+                    </View>
+                    {alts.length > 0 || (!line.matched && candidates.length > 0) ? (
+                      <Pressable onPress={() => setPickItemId(open ? null : line.itemId)}>
+                        <Text style={styles.matchLink}>
+                          {open ? 'Kapat' : line.matched ? 'Başka ürün seç' : 'Ürün seç'}
+                        </Text>
+                      </Pressable>
+                    ) : null}
+                  </View>
+                  {open
+                    ? candidates.map((cand) => {
+                        const active = cand.catalogId === line.catalogId
+                        return (
+                          <Pressable
+                            key={cand.catalogId}
+                            onPress={() => chooseCatalog(line.itemId, cand.catalogId)}
+                            style={[styles.matchAlt, active && styles.matchAltActive]}
+                          >
+                            <View style={{ flex: 1 }}>
+                              <Text style={styles.lineName}>{cand.catalogName}</Text>
+                              <Text style={styles.lineStore}>
+                                en ucuz {formatTry(cand.cheapestPrice)} · skor{' '}
+                                {Math.round(cand.matchScore)}
+                              </Text>
+                            </View>
+                            <Text style={styles.matchPick}>{active ? 'Seçili' : 'Seç'}</Text>
+                          </Pressable>
+                        )
+                      })
+                    : null}
+                </View>
+              )
+            })}
 
             {result.potentialSaving > 0 ? (
               <View style={styles.savingCard}>
@@ -328,6 +393,40 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     color: colors.ink,
   },
+  matchHint: {
+    marginTop: -4,
+    marginBottom: 8,
+    color: colors.inkMuted,
+    fontSize: 13,
+    lineHeight: 18,
+  },
+  matchCard: {
+    backgroundColor: colors.bgElevated,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: colors.border,
+    padding: 12,
+    marginBottom: 8,
+    gap: 8,
+  },
+  matchHead: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 10,
+  },
+  matchLink: { color: colors.brand, fontWeight: '800', fontSize: 13 },
+  matchAlt: {
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: 10,
+    padding: 10,
+    backgroundColor: colors.bg,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  matchAltActive: { borderColor: colors.brand, backgroundColor: '#EAF2EE' },
+  matchPick: { color: colors.brand, fontWeight: '800', fontSize: 12 },
   planCard: {
     backgroundColor: colors.bgElevated,
     borderRadius: 14,

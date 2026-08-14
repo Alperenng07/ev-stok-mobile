@@ -5,20 +5,26 @@ const SEARCH_VARIANTS: Record<string, string[]> = {
   yumurta: ['yumurta 15', 'yumurta 10', 'yumurta 30', 'yumurta'],
   deterjan: ['camasir deterjani', 'toz deterjan', 'sivi deterjan', 'deterjan'],
   camasir: ['camasir deterjani', 'toz deterjan', 'sivi deterjan'],
+  yumusatici: ['camasir yumusatici', 'yumusatici', 'konsantre yumusatici'],
   peynir: ['beyaz peynir', 'peynir'],
   tereyag: ['tereyagi', 'tereyag'],
   pirinc: ['pirinc 1 kg', 'pirinc'],
   seker: ['toz seker', 'seker 1 kg', 'seker'],
   cay: ['cay 1 kg', 'cay'],
   makarna: ['makarna', 'spagetti'],
-  yag: ['aycicek yagi', 'sivi yag'],
+  yag: ['aycicek yagi', 'aycicek yag', 'sivi yag'],
+  cikolata: ['sutlu cikolata', 'cikolata tablet', 'cikolata'],
   su: ['su 5 lt', 'su 5l', 'su'],
   tavuk: ['tavuk gogus', 'tavuk'],
   tuvalet: ['tuvalet kagidi', 'tuvalet kagidi 32'],
 }
 
 const SPECIALTY_PENALTY =
-  /(organik|glutensiz|ruseym\w*|kepekli|sandvic\w*|cocuk|cilekli|cikolatali|kakaolu|bildiricin|gezen|omega|tam bugday|siyez|cavdar|yagli tohum|premium|gourmet|laktozsuz|protein|susamli|odun ekmek|hamburger|tost ekmek|cesitleri)/i
+  /(organik|glutensiz|ruseym\w*|kepekli|sandvic\w*|cocuk|cilekli|cikolatali|kakaolu|bildiricin|gezen|omega|tam bugday|siyez|cavdar|yagli tohum|premium|gourmet|laktozsuz|protein|susamli|odun ekmek|hamburger|tost ekmek|cesitleri|nutella|maximus|findik kremasi|kakao findik)/i
+
+/** Jenerik aramada yanlış marka / yan ürün cezası. */
+const GENERIC_WRONG_HIT =
+  /(yumos|nutella|maximus|findik kremasi|kakao findik|misir yag|cicek yag|zeytinyag|zeytin yag|kanola|soya yag)/i
 
 function normalize(text: string): string {
   return text
@@ -40,7 +46,7 @@ export function normalizeQuery(text: string): string {
 
 function stemKey(query: string): string {
   const q = normalize(query)
-  // İlk anlamlı kelimeyi baz al (ör. "çamaşır deterjanı" → deterjan da yakalanır)
+  if (q.includes('yumusatici')) return 'yumusatici'
   if (q.includes('deterjan') || q.includes('camasir')) return 'deterjan'
   if (q.includes('ekmek')) return 'ekmek'
   if (q.includes('yumurta')) return 'yumurta'
@@ -51,7 +57,8 @@ function stemKey(query: string): string {
   if (q.includes('seker')) return 'seker'
   if (/(^|\s)cay(\s|$)/.test(q)) return 'cay'
   if (q.includes('makarna') || q.includes('spagetti')) return 'makarna'
-  if (q.includes('aycicek') || q.includes('sivi yag')) return 'yag'
+  if (q.includes('cikolata')) return 'cikolata'
+  if (q.includes('aycicek') || q.includes('sivi yag') || /(^|\s)yag(\s|$)/.test(q)) return 'yag'
   if (/(^|\s)su(\s|$)/.test(q)) return 'su'
   if (q.includes('tavuk')) return 'tavuk'
   if (q.includes('tuvalet')) return 'tuvalet'
@@ -73,7 +80,7 @@ export function searchKeywordsFor(itemName: string): string[] {
 }
 
 function queryWantsSpecialty(query: string): boolean {
-  return SPECIALTY_PENALTY.test(normalize(query))
+  return SPECIALTY_PENALTY.test(normalize(query)) || GENERIC_WRONG_HIT.test(normalize(query))
 }
 
 function volumeScore(query: string, title: string): number {
@@ -100,6 +107,32 @@ function volumeScore(query: string, title: string): number {
   if (key === 'deterjan') {
     if (/\b(toz|sivi)\s+deterjan\b/.test(t) || /\bdeterjan\b/.test(t)) return 20
     if (/\bbulasik|makine yumusatici|yumusatici\b/.test(t) && !q.includes('bulasik')) return -25
+  }
+  if (key === 'yumusatici') {
+    if (/\byumusatici\b/.test(t)) return 35
+    if (/\bdeterjan\b/.test(t) && !/\byumusatici\b/.test(t)) return -40
+    if (/\byumos\b/.test(t) && !/\byumos\b/.test(q)) return -35
+  }
+  if (key === 'yag') {
+    if (/\baycicek\b/.test(t)) return 40
+    if (/\bsivi yag\b/.test(t) && !/\b(misir|cicek|zeytin|findik|kanola|soya)\b/.test(t)) return 25
+    if (/\b(misir|cicek yag|zeytin|findik|kanola|soya)\b/.test(t)) {
+      const wantsAlt =
+        /\bmisir\b/.test(q) ||
+        /\bcicek\b/.test(q) ||
+        /\bzeytin\b/.test(q) ||
+        /\bfindik\b/.test(q) ||
+        /\bkanola\b/.test(q) ||
+        /\bsoya\b/.test(q)
+      if (!wantsAlt) return -55
+    }
+  }
+  if (key === 'cikolata') {
+    if (/\b(nutella|maximus|findik kremasi|kakao findik)\b/.test(t) && !queryWantsSpecialty(query)) {
+      return -60
+    }
+    if (/\bcikolata\b/.test(t) && !/\bkrem\b/.test(t)) return 30
+    if (/\bkrem\b/.test(t) && !/\bkrem\b/.test(q)) return -40
   }
   return 0
 }
@@ -130,7 +163,8 @@ export function scoreProductTitle(query: string, title: string): number {
 
   // Ana kelime başlıkta yoksa ele
   if (key.length >= 3 && !t.includes(key) && !qTokens.some((tok) => t.includes(tok))) {
-    return 0
+    // yağ aramasında aycicek kabul
+    if (!(key === 'yag' && /\baycicek\b/.test(t))) return 0
   }
 
   // Kısa / sade isim bonus
@@ -139,6 +173,11 @@ export function scoreProductTitle(query: string, title: string): number {
   // Özel ürün cezası (kullanıcı özellikle istemediyse)
   if (!queryWantsSpecialty(query) && SPECIALTY_PENALTY.test(t)) {
     score -= 55
+  }
+
+  // Jenerik aramada yanlış marka / yan ürün
+  if (!queryWantsSpecialty(query) && GENERIC_WRONG_HIT.test(t)) {
+    score -= 40
   }
 
   score += volumeScore(query, title)

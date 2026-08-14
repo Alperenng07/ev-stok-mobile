@@ -15,6 +15,25 @@ export type NearbyStore = {
   lng: number
 }
 
+export type PricedOffer = {
+  chainId: MarketChainId
+  chainName: string
+  storeName: string
+  distanceKm: number
+  unitPrice: number
+  lineTotal: number
+  indexTime?: string
+}
+
+/** Aynı liste kalemi için seçilebilir marketfiyati ürün adayları. */
+export type ProductCandidate = {
+  catalogId: string
+  catalogName: string
+  matchScore: number
+  cheapestPrice: number
+  offers: PricedOffer[]
+}
+
 export type PricedLine = {
   itemId: string
   itemName: string
@@ -23,15 +42,9 @@ export type PricedLine = {
   catalogId: string | null
   catalogName: string | null
   matched: boolean
-  offers: {
-    chainId: MarketChainId
-    chainName: string
-    storeName: string
-    distanceKm: number
-    unitPrice: number
-    lineTotal: number
-    indexTime?: string
-  }[]
+  offers: PricedOffer[]
+  /** Kullanıcının seçebileceği alternatif ürünler (seçili olan dahil). */
+  candidates: ProductCandidate[]
 }
 
 export type PlanLine = {
@@ -56,7 +69,6 @@ export type MissingPlanItem = {
   qty: number
   unit: string
   reason: 'not_in_chain' | 'no_match'
-  /** Bu markette yoksa başka yerdeki en ucuz alternatif */
   alternative: {
     chainId: MarketChainId
     chainName: string
@@ -73,14 +85,12 @@ export type BudgetPlan = {
   subtitle: string
   kind: 'mixed' | 'single'
   chainId?: MarketChainId
-  /** Sadece bu planda bulunan ürünlerin toplamı */
   total: number
   storeCount: number
   availableCount: number
   missingCount: number
   lines: PlanLine[]
   missingItems: MissingPlanItem[]
-  /** Geriye dönük kısa isim listesi */
   missingNames: string[]
 }
 

@@ -7,11 +7,13 @@ import type {
   NearbyStore,
   PlanLine,
   PricedLine,
+  ProductCandidate,
 } from '../types/budget'
 import { chainById } from './chains'
 import {
   cheapestPerChain,
-  pickBestProduct,
+  rankProducts,
+  rankProductsForPicker,
   searchProductsForItem,
   type MarketDepotOffer,
 } from './marketFiyati'
@@ -38,6 +40,23 @@ function offerFromDepot(
     lineTotal: round2(depot.price * qty),
     indexTime: depot.indexTime ?? undefined,
   }
+}
+
+function candidatesFromRanked(
+  ranked: ReturnType<typeof rankProducts>,
+  qty: number,
+  limit = 8,
+): ProductCandidate[] {
+  return ranked.slice(0, limit).map((product) => {
+    const offers = cheapestPerChain(product).map((d) => offerFromDepot(d, qty))
+    return {
+      catalogId: product.id,
+      catalogName: product.title,
+      matchScore: product.matchScore ?? 0,
+      cheapestPrice: offers[0]?.unitPrice ?? product.depots[0]?.price ?? 0,
+      offers,
+    }
+  })
 }
 
 function collectStores(lines: PricedLine[]): NearbyStore[] {
@@ -81,7 +100,6 @@ function buildPlan(options: {
   kind: BudgetPlan['kind']
   chainId?: MarketChainId
   allLines: PricedLine[]
-  /** Bu planda alınacak teklifler */
   picks: { line: PricedLine; offer: PricedLine['offers'][number] }[]
 }): BudgetPlan {
   const pickIds = new Set(options.picks.map((p) => p.line.itemId))
@@ -132,68 +150,11 @@ function buildPlan(options: {
   }
 }
 
-/** Anlık konum + marketfiyati.org.tr canlı fiyatlarıyla bütçe planları üretir. */
-export async function buildLiveBudgetPlans(options: {
-  pendingItems: StockItem[]
-  latitude: number
-  longitude: number
-  locationLabel: string
-  distanceKm?: number
-}): Promise<BudgetResult> {
-  const { pendingItems, latitude, longitude, locationLabel } = options
-  const distanceKm = options.distanceKm ?? 8
-
-  const lines: PricedLine[] = []
-
-  for (const item of pendingItems) {
-    const qty = Math.max(item.neededQty || 1, 1)
-    try {
-      const products = await searchProductsForItem({
-        itemName: item.name,
-        latitude,
-        longitude,
-        distanceKm,
-      })
-      const best = pickBestProduct(item.name, products)
-      if (!best) {
-        lines.push({
-          itemId: item.id,
-          itemName: item.name,
-          qty,
-          unit: item.unit,
-          catalogId: null,
-          catalogName: null,
-          matched: false,
-          offers: [],
-        })
-        continue
-      }
-
-      const perChain = cheapestPerChain(best)
-      lines.push({
-        itemId: item.id,
-        itemName: item.name,
-        qty,
-        unit: item.unit,
-        catalogId: best.id,
-        catalogName: best.title,
-        matched: true,
-        offers: perChain.map((d) => offerFromDepot(d, qty)),
-      })
-    } catch {
-      lines.push({
-        itemId: item.id,
-        itemName: item.name,
-        qty,
-        unit: item.unit,
-        catalogId: null,
-        catalogName: null,
-        matched: false,
-        offers: [],
-      })
-    }
-  }
-
+/** Mevcut satırlardan planları yeniden kur (ürün seçimi değişince). */
+export function rebuildBudgetFromLines(
+  base: Pick<BudgetResult, 'locationLabel' | 'location' | 'disclaimer' | 'source'>,
+  lines: PricedLine[],
+): BudgetResult {
   const matched = lines.filter((l) => l.matched && l.offers.length > 0)
 
   const mixedPicks = matched
@@ -245,16 +206,122 @@ export async function buildLiveBudgetPlans(options: {
   const potentialSaving = round2(Math.max(0, worstSingleTotal - bestTotal))
 
   return {
-    locationLabel,
-    location: { lat: latitude, lng: longitude },
+    locationLabel: base.locationLabel,
+    location: base.location,
     stores: collectStores(lines),
     lines,
     plans,
     bestTotal,
     worstSingleTotal,
     potentialSaving,
-    source: 'marketfiyati',
-    disclaimer:
-      'Canlı veriler marketfiyati.org.tr üzerinden alınır. Ürün adı sade eşleştirmeyle seçilir (ör. ekmek → normal ekmek); yanlış specialty ürünler elenir.',
+    source: base.source,
+    disclaimer: base.disclaimer,
   }
+}
+
+/** Kullanıcı farklı marketfiyati ürününü seçince satırı ve planları günceller. */
+export function applyCatalogChoice(
+  result: BudgetResult,
+  itemId: string,
+  catalogId: string,
+): BudgetResult {
+  const lines = result.lines.map((line) => {
+    if (line.itemId !== itemId) return line
+    const cand = (line.candidates ?? []).find((c) => c.catalogId === catalogId)
+    if (!cand) return line
+    return {
+      ...line,
+      catalogId: cand.catalogId,
+      catalogName: cand.catalogName,
+      matched: cand.offers.length > 0,
+      offers: cand.offers,
+      candidates: line.candidates ?? [],
+    }
+  })
+  return rebuildBudgetFromLines(result, lines)
+}
+
+/** Anlık konum + marketfiyati.org.tr canlı fiyatlarıyla bütçe planları üretir. */
+export async function buildLiveBudgetPlans(options: {
+  pendingItems: StockItem[]
+  latitude: number
+  longitude: number
+  locationLabel: string
+  distanceKm?: number
+}): Promise<BudgetResult> {
+  const { pendingItems, latitude, longitude, locationLabel } = options
+  const distanceKm = options.distanceKm ?? 8
+
+  const lines: PricedLine[] = []
+
+  for (const item of pendingItems) {
+    const qty = Math.max(item.neededQty || 1, 1)
+    try {
+      const products = await searchProductsForItem({
+        itemName: item.name,
+        latitude,
+        longitude,
+        distanceKm,
+      })
+      const bestPick = rankProducts(item.name, products)[0] ?? null
+      const ranked = rankProductsForPicker(item.name, products)
+      const ordered = bestPick
+        ? [bestPick, ...ranked.filter((p) => p.id !== bestPick.id)]
+        : ranked
+      const candidates = candidatesFromRanked(ordered, qty)
+
+      if (!bestPick) {
+        lines.push({
+          itemId: item.id,
+          itemName: item.name,
+          qty,
+          unit: item.unit,
+          catalogId: null,
+          catalogName: null,
+          matched: false,
+          offers: [],
+          candidates,
+        })
+        continue
+      }
+
+      const best =
+        candidates.find((c) => c.catalogId === bestPick.id) ?? candidates[0]
+
+      lines.push({
+        itemId: item.id,
+        itemName: item.name,
+        qty,
+        unit: item.unit,
+        catalogId: best.catalogId,
+        catalogName: best.catalogName,
+        matched: true,
+        offers: best.offers,
+        candidates,
+      })
+    } catch {
+      lines.push({
+        itemId: item.id,
+        itemName: item.name,
+        qty,
+        unit: item.unit,
+        catalogId: null,
+        catalogName: null,
+        matched: false,
+        offers: [],
+        candidates: [],
+      })
+    }
+  }
+
+  return rebuildBudgetFromLines(
+    {
+      locationLabel,
+      location: { lat: latitude, lng: longitude },
+      source: 'marketfiyati',
+      disclaimer:
+        'Canlı veriler marketfiyati.org.tr üzerinden alınır. Yanlış eşleşme varsa “Başka ürün seç” ile değiştirebilirsin.',
+    },
+    lines,
+  )
 }
