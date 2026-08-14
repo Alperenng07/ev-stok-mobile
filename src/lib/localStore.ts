@@ -83,6 +83,39 @@ export const localStore = {
     const list = await this.getMembers()
     return list.filter((m) => m.familyId === familyId)
   },
+  async removeMember(familyId: string, userId: string): Promise<void> {
+    const list = await this.getMembers()
+    await writeJson(
+      KEYS.members,
+      list.filter((m) => !(m.familyId === familyId && m.userId === userId)),
+    )
+  },
+  async updateMembersForUser(
+    userId: string,
+    patch: { displayName?: string; email?: string },
+  ): Promise<void> {
+    const list = await this.getMembers()
+    const next = list.map((m) => {
+      if (m.userId !== userId) return m
+      return {
+        ...m,
+        displayName: patch.displayName ?? m.displayName,
+        email: patch.email ?? m.email,
+      }
+    })
+    await writeJson(KEYS.members, next)
+  },
+  async changePasswordEmailKey(oldEmail: string, newEmail: string): Promise<void> {
+    const map = await readJson<Record<string, string>>(KEYS.passwords, {})
+    const oldKey = oldEmail.toLowerCase()
+    const newKey = newEmail.toLowerCase()
+    if (oldKey === newKey) return
+    if (map[oldKey] != null) {
+      map[newKey] = map[oldKey]
+      delete map[oldKey]
+      await writeJson(KEYS.passwords, map)
+    }
+  },
   async familyForUser(userId: string): Promise<Family | null> {
     const members = await this.getMembers()
     const mine = members.find((m) => m.userId === userId)

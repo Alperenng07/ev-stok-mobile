@@ -18,12 +18,14 @@
       "bundleIdentifier": "com.evstok.mobile",
       "buildNumber": "1",
       "infoPlist": {
-        "CFBundleDisplayName": "Ev Stok"
+        "CFBundleDisplayName": "Ev Stok",
+        "NSLocationWhenInUseUsageDescription": "Yakındaki marketlerdeki ürün fiyatlarını ve bütçe planlarını göstermek için konumun kullanılır."
       }
     },
     "android": {
       "package": "com.evstok.mobile",
       "versionCode": 1,
+      "permissions": ["ACCESS_COARSE_LOCATION", "ACCESS_FINE_LOCATION"],
       "adaptiveIcon": {
         "backgroundColor": "#0F3D2E",
         "foregroundImage": "./assets/android-icon-foreground.png",
@@ -39,7 +41,13 @@
     "plugins": [
       "expo-router",
       "expo-secure-store",
-      "expo-system-ui"
+      "expo-system-ui",
+      [
+        "expo-location",
+        {
+          "locationWhenInUsePermission": "Yakındaki market fiyatları ve bütçe planı için konum gerekir."
+        }
+      ]
     ],
     "experiments": {
       "typedRoutes": true

@@ -10,6 +10,8 @@ export function renewDueItems(items: StockItem[]): StockItem[] {
       return {
         ...item,
         purchased: false,
+        purchasedPlaceId: null,
+        purchasedPlaceLabel: null,
         updatedAt: new Date().toISOString(),
       }
     }

@@ -37,6 +37,8 @@ create table if not exists public.items (
   due_date date not null,
   renewal_days int,
   purchased boolean not null default false,
+  purchased_place_id text,
+  purchased_place_label text,
   notes text not null default '',
   created_by uuid not null references public.profiles (id) on delete cascade,
   created_at timestamptz not null default now(),
@@ -144,6 +146,22 @@ create policy "members select family"
 create policy "members insert self"
   on public.family_members for insert
   with check (user_id = auth.uid());
+
+create policy "members delete self"
+  on public.family_members for delete
+  using (user_id = auth.uid());
+
+create policy "members delete by owner"
+  on public.family_members for delete
+  using (
+    exists (
+      select 1 from public.family_members own
+      where own.family_id = family_members.family_id
+        and own.user_id = auth.uid()
+        and own.role = 'owner'
+    )
+    and user_id <> auth.uid()
+  );
 
 create policy "items select family"
   on public.items for select

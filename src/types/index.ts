@@ -1,3 +1,8 @@
+export type PurchasePlace = {
+  id: string
+  label: string
+}
+
 export type StockItem = {
   id: string
   familyId: string
@@ -8,6 +13,9 @@ export type StockItem = {
   dueDate: string
   renewalDays: number | null
   purchased: boolean
+  /** bim | sok | a101 | ... | other */
+  purchasedPlaceId: string | null
+  purchasedPlaceLabel: string | null
   notes: string
   createdBy: string
   createdAt: string

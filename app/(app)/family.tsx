@@ -1,14 +1,18 @@
 import * as Clipboard from 'expo-clipboard'
+import { router } from 'expo-router'
+import { useState } from 'react'
 import { Alert, Pressable, StyleSheet, Text, View } from 'react-native'
 import { SafeAreaView } from 'react-native-safe-area-context'
-import { Banner, Screen, Subtitle, Title } from '../../src/components/ui'
+import { Banner, Button, Screen, Subtitle, Title } from '../../src/components/ui'
 import { useAuth } from '../../src/context/AuthContext'
 import { useFamily } from '../../src/context/FamilyContext'
 import { colors } from '../../src/theme/colors'
+import type { FamilyMember } from '../../src/types'
 
 export default function FamilyScreen() {
-  const { cloudEnabled } = useAuth()
-  const { family, members } = useFamily()
+  const { user, cloudEnabled } = useAuth()
+  const { family, members, myRole, removeMember, leaveFamily } = useFamily()
+  const [busyId, setBusyId] = useState<string | null>(null)
 
   async function copyCode() {
     if (!family) return
@@ -16,16 +20,66 @@ export default function FamilyScreen() {
     Alert.alert('Kopyalandı', 'Davet kodu panoya alındı. Aile üyesine gönder.')
   }
 
+  function confirmRemove(member: FamilyMember) {
+    Alert.alert(
+      'Üyeyi çıkar',
+      `${member.displayName} aileden çıkarılsın mı?`,
+      [
+        { text: 'Vazgeç', style: 'cancel' },
+        {
+          text: 'Çıkar',
+          style: 'destructive',
+          onPress: () => {
+            void (async () => {
+              setBusyId(member.userId)
+              try {
+                await removeMember(member.userId)
+              } catch (err) {
+                Alert.alert('Hata', err instanceof Error ? err.message : 'Çıkarılamadı')
+              } finally {
+                setBusyId(null)
+              }
+            })()
+          },
+        },
+      ],
+    )
+  }
+
+  function confirmLeave() {
+    Alert.alert('Aileden ayrıl', 'Bu aileden ayrılmak istediğine emin misin?', [
+      { text: 'Vazgeç', style: 'cancel' },
+      {
+        text: 'Ayrıl',
+        style: 'destructive',
+        onPress: () => {
+          void (async () => {
+            setBusyId(user?.id ?? 'self')
+            try {
+              await leaveFamily()
+              router.replace('/onboarding-family')
+            } catch (err) {
+              Alert.alert('Hata', err instanceof Error ? err.message : 'Ayrılamadı')
+            } finally {
+              setBusyId(null)
+            }
+          })()
+        },
+      },
+    ])
+  }
+
   return (
     <SafeAreaView style={styles.safe} edges={['top']}>
       <Screen style={styles.screen}>
         <Title>Aile</Title>
         <Subtitle>
-          Davet kodunu paylaşarak yeni üye ekle. Üyeler aynı stok listesini görür.
+          Davet kodunu paylaşarak üye ekle. Kurucu yanlış katılanları çıkarabilir; herkes aileden
+          ayrılabilir.
         </Subtitle>
 
         {!cloudEnabled ? (
-          <Banner text="Yerel modda davet kodu yalnızca bu cihazdaki hesaplar arasında çalışır. Mağaza sürümü için yeni (ayrı) Supabase bağlayın." />
+          <Banner text="Yerel modda davet kodu yalnızca bu cihazdaki hesaplar arasında çalışır." />
         ) : null}
 
         {family ? (
@@ -37,22 +91,48 @@ export default function FamilyScreen() {
               <Text style={styles.code}>{family.inviteCode}</Text>
               <Text style={styles.copyHint}>Kopyala</Text>
             </Pressable>
-            <Text style={styles.hint}>
-              Yeni üye uygulamayı indirip kayıt olur, ardından bu kodla aileye katılır.
-            </Text>
           </View>
         ) : null}
 
         <Text style={styles.section}>Üyeler ({members.length})</Text>
-        {members.map((m) => (
-          <View key={m.id} style={styles.member}>
-            <View>
-              <Text style={styles.memberName}>{m.displayName}</Text>
-              <Text style={styles.memberEmail}>{m.email}</Text>
+        {members.map((m) => {
+          const isMe = m.userId === user?.id
+          const canKick = myRole === 'owner' && !isMe && m.role !== 'owner'
+          return (
+            <View key={m.id} style={styles.member}>
+              <View style={{ flex: 1, paddingRight: 8 }}>
+                <Text style={styles.memberName}>
+                  {m.displayName}
+                  {isMe ? ' (sen)' : ''}
+                </Text>
+                <Text style={styles.memberEmail}>{m.email}</Text>
+              </View>
+              <View style={styles.memberRight}>
+                <Text style={styles.role}>{m.role === 'owner' ? 'Kurucu' : 'Üye'}</Text>
+                {canKick ? (
+                  <Pressable
+                    onPress={() => confirmRemove(m)}
+                    disabled={busyId === m.userId}
+                    style={styles.kickBtn}
+                  >
+                    <Text style={styles.kickText}>
+                      {busyId === m.userId ? '…' : 'Çıkar'}
+                    </Text>
+                  </Pressable>
+                ) : null}
+              </View>
             </View>
-            <Text style={styles.role}>{m.role === 'owner' ? 'Kurucu' : 'Üye'}</Text>
-          </View>
-        ))}
+          )
+        })}
+
+        <View style={styles.leaveBlock}>
+          <Button
+            label="Aileden ayrıl"
+            variant="danger"
+            onPress={confirmLeave}
+            loading={busyId === user?.id}
+          />
+        </View>
       </Screen>
     </SafeAreaView>
   )
@@ -102,12 +182,6 @@ const styles = StyleSheet.create({
     color: colors.brandSoft,
     fontWeight: '700',
   },
-  hint: {
-    marginTop: 10,
-    fontSize: 13,
-    lineHeight: 18,
-    color: colors.inkMuted,
-  },
   section: {
     marginTop: 22,
     marginBottom: 10,
@@ -136,9 +210,28 @@ const styles = StyleSheet.create({
     color: colors.inkMuted,
     fontSize: 13,
   },
+  memberRight: {
+    alignItems: 'flex-end',
+    gap: 8,
+  },
   role: {
     fontSize: 12,
     fontWeight: '700',
     color: colors.brandSoft,
+  },
+  kickBtn: {
+    backgroundColor: colors.dangerSoft,
+    borderRadius: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+  },
+  kickText: {
+    color: colors.danger,
+    fontWeight: '800',
+    fontSize: 12,
+  },
+  leaveBlock: {
+    marginTop: 18,
+    marginBottom: 24,
   },
 })

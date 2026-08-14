@@ -49,6 +49,9 @@ export function ItemRow({ item, onToggle, onEdit }: Props) {
           {item.renewalDays ? ` · Her ${item.renewalDays} gün` : ''}
         </Text>
         {item.notes ? <Text style={styles.notes}>{item.notes}</Text> : null}
+        {item.purchased && item.purchasedPlaceLabel ? (
+          <Text style={styles.place}>Alındığı yer: {item.purchasedPlaceLabel}</Text>
+        ) : null}
       </Pressable>
     </View>
   )
@@ -139,5 +142,11 @@ const styles = StyleSheet.create({
     marginTop: 2,
     fontSize: 13,
     color: colors.inkMuted,
+  },
+  place: {
+    marginTop: 2,
+    fontSize: 12,
+    fontWeight: '700',
+    color: colors.brandSoft,
   },
 })

@@ -18,6 +18,7 @@ type AuthContextValue = {
   signIn: (email: string, password: string) => Promise<void>
   signUp: (email: string, password: string, displayName: string) => Promise<void>
   signOut: () => Promise<void>
+  updateProfile: (input: { displayName: string; email: string }) => Promise<void>
 }
 
 const AuthContext = createContext<AuthContextValue | null>(null)
@@ -142,6 +143,54 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setUser(null)
   }, [])
 
+  const updateProfile = useCallback(
+    async (input: { displayName: string; email: string }) => {
+      if (!user) throw new Error('Oturum gerekli')
+      const displayName = input.displayName.trim()
+      const email = input.email.trim().toLowerCase()
+      if (!displayName) throw new Error('Ad gerekli')
+      if (!email.includes('@')) throw new Error('Geçerli bir e-posta gir')
+
+      if (isCloudEnabled && supabase) {
+        const { error } = await supabase.auth.updateUser({
+          email,
+          data: { display_name: displayName },
+        })
+        if (error) throw error
+        await supabase
+          .from('profiles')
+          .update({ email, display_name: displayName })
+          .eq('id', user.id)
+        const next = { ...user, email, displayName }
+        setUser(next)
+        return
+      }
+
+      if (email !== user.email.toLowerCase()) {
+        const taken = await localStore.findProfileByEmail(email)
+        if (taken && taken.id !== user.id) throw new Error('Bu e-posta kullanımda')
+        await localStore.changePasswordEmailKey(user.email, email)
+      }
+
+      const profile = {
+        id: user.id,
+        email,
+        displayName,
+        createdAt: new Date().toISOString(),
+      }
+      const existing = (await localStore.getProfiles()).find((p) => p.id === user.id)
+      await localStore.saveProfile({
+        ...profile,
+        createdAt: existing?.createdAt ?? profile.createdAt,
+      })
+      await localStore.updateMembersForUser(user.id, { displayName, email })
+      const next = { id: user.id, email, displayName }
+      await localStore.setSession(next)
+      setUser(next)
+    },
+    [user],
+  )
+
   const value = useMemo(
     () => ({
       user,
@@ -150,8 +199,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       signIn,
       signUp,
       signOut,
+      updateProfile,
     }),
-    [user, loading, signIn, signUp, signOut],
+    [user, loading, signIn, signUp, signOut, updateProfile],
   )
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>

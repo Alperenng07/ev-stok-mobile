@@ -25,6 +25,8 @@ type DbItem = {
   due_date: string
   renewal_days: number | null
   purchased: boolean
+  purchased_place_id: string | null
+  purchased_place_label: string | null
   notes: string
   created_by: string
   created_at: string
@@ -42,6 +44,8 @@ function toStockItem(row: DbItem): StockItem {
     dueDate: row.due_date,
     renewalDays: row.renewal_days,
     purchased: row.purchased,
+    purchasedPlaceId: row.purchased_place_id ?? null,
+    purchasedPlaceLabel: row.purchased_place_label ?? null,
     notes: row.notes ?? '',
     createdBy: row.created_by,
     createdAt: row.created_at,
@@ -60,6 +64,8 @@ function toDbItem(item: StockItem): DbItem {
     due_date: item.dueDate,
     renewal_days: item.renewalDays,
     purchased: item.purchased,
+    purchased_place_id: item.purchasedPlaceId,
+    purchased_place_label: item.purchasedPlaceLabel,
     notes: item.notes,
     created_by: item.createdBy,
     created_at: item.createdAt,
@@ -68,6 +74,7 @@ function toDbItem(item: StockItem): DbItem {
 }
 
 type ItemsContextValue = {
+  items: StockItem[]
   filtered: StockItem[]
   filter: FilterId
   setFilter: (f: FilterId) => void
@@ -79,7 +86,10 @@ type ItemsContextValue = {
   addItem: (draft: ItemDraft) => Promise<void>
   updateItem: (id: string, draft: ItemDraft) => Promise<void>
   removeItem: (id: string) => Promise<void>
-  togglePurchased: (id: string) => Promise<void>
+  togglePurchased: (
+    id: string,
+    place?: { placeId: string; placeLabel: string } | null,
+  ) => Promise<void>
 }
 
 const ItemsContext = createContext<ItemsContextValue | null>(null)
@@ -188,6 +198,8 @@ export function ItemsProvider({ children }: { children: ReactNode }) {
         dueDate: draft.dueDate,
         renewalDays: draft.renewalDays,
         purchased: false,
+        purchasedPlaceId: null,
+        purchasedPlaceLabel: null,
         notes: draft.notes.trim(),
         createdBy: user.id,
         createdAt: now,
@@ -240,7 +252,7 @@ export function ItemsProvider({ children }: { children: ReactNode }) {
   }, [])
 
   const togglePurchased = useCallback(
-    async (id: string) => {
+    async (id: string, place?: { placeId: string; placeLabel: string } | null) => {
       let next: StockItem | null = null
       setItems((prev) =>
         prev.map((item) => {
@@ -256,11 +268,19 @@ export function ItemsProvider({ children }: { children: ReactNode }) {
               purchased: true,
               currentQty: item.currentQty + item.neededQty,
               dueDate: nextDue,
+              purchasedPlaceId: place?.placeId ?? null,
+              purchasedPlaceLabel: place?.placeLabel ?? null,
               updatedAt: now,
             }
             return next
           }
-          next = { ...item, purchased: false, updatedAt: now }
+          next = {
+            ...item,
+            purchased: false,
+            purchasedPlaceId: null,
+            purchasedPlaceLabel: null,
+            updatedAt: now,
+          }
           return next
         }),
       )
@@ -294,6 +314,7 @@ export function ItemsProvider({ children }: { children: ReactNode }) {
 
   const value = useMemo(
     () => ({
+      items,
       filtered,
       filter,
       setFilter,
@@ -308,6 +329,7 @@ export function ItemsProvider({ children }: { children: ReactNode }) {
       togglePurchased,
     }),
     [
+      items,
       filtered,
       filter,
       query,

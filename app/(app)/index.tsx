@@ -1,3 +1,4 @@
+import { useRouter } from 'expo-router'
 import { useState } from 'react'
 import {
   FlatList,
@@ -10,9 +11,14 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context'
 import { ItemFormModal } from '../../src/components/ItemFormModal'
 import { ItemRow } from '../../src/components/ItemRow'
+import { PurchasePlaceModal } from '../../src/components/PurchasePlaceModal'
 import { Banner, Button } from '../../src/components/ui'
+import { useBudgetCache } from '../../src/context/BudgetCacheContext'
 import { useFamily } from '../../src/context/FamilyContext'
 import { useItems } from '../../src/context/ItemsContext'
+import { useSavings } from '../../src/context/SavingsContext'
+import { formatTry } from '../../src/lib/budgetPlanner'
+import { computePurchaseSavings } from '../../src/lib/purchaseSavings'
 import { colors } from '../../src/theme/colors'
 import type { FilterId, StockItem } from '../../src/types'
 
@@ -24,7 +30,10 @@ const FILTERS: { id: FilterId; label: string }[] = [
 ]
 
 export default function ListScreen() {
+  const router = useRouter()
   const { family } = useFamily()
+  const { hasCache, getLineForItem, result: budgetResult } = useBudgetCache()
+  const { addPurchaseSavings } = useSavings()
   const {
     filtered,
     filter,
@@ -42,21 +51,96 @@ export default function ListScreen() {
 
   const [formOpen, setFormOpen] = useState(false)
   const [editing, setEditing] = useState<StockItem | null>(null)
+  const [placeItem, setPlaceItem] = useState<StockItem | null>(null)
+  const [flash, setFlash] = useState<string | null>(null)
 
   function openCreate() {
     setEditing(null)
     setFormOpen(true)
   }
 
+  function goCalculate() {
+    router.push({ pathname: '/(app)/budget', params: { autostart: '1' } })
+  }
+
+  function onToggle(item: StockItem) {
+    if (item.purchased) {
+      void togglePurchased(item.id)
+      return
+    }
+    setPlaceItem(item)
+  }
+
+  async function onPlaceConfirm(place: { placeId: string; placeLabel: string }) {
+    if (!placeItem) return
+    const item = placeItem
+    setPlaceItem(null)
+
+    await togglePurchased(item.id, place)
+
+    if (place.placeId === 'other') {
+      setFlash('Alındı · Diğer (bilanço için fiyat yok)')
+      return
+    }
+
+    if (!hasCache) {
+      setFlash('Alındı kaydedildi. Bilanço için önce Bütçe’de Hesapla.')
+      return
+    }
+
+    const line = getLineForItem(item.id)
+    if (!line) {
+      setFlash('Alındı kaydedildi. Bu ürün son hesapta yoktu; tekrar Hesapla.')
+      return
+    }
+
+    const calc = computePurchaseSavings(line, place.placeId)
+    if (!calc) {
+      setFlash(`Alındı · ${place.placeLabel} (bu markette fiyat yoktu)`)
+      return
+    }
+
+    await addPurchaseSavings({
+      itemId: item.id,
+      itemName: item.name,
+      placeId: place.placeId,
+      placeLabel: place.placeLabel,
+      paidUnitPrice: calc.paidUnitPrice,
+      qty: calc.qty,
+      savedAmount: calc.savedAmount,
+      missedAmount: calc.missedAmount,
+      minUnitPrice: calc.minUnitPrice,
+      maxUnitPrice: calc.maxUnitPrice,
+      catalogName: calc.catalogName,
+      locationLabel: budgetResult?.locationLabel ?? '',
+    })
+
+    const parts: string[] = [`Alındı · ${place.placeLabel}`]
+    if (calc.savedAmount > 0) parts.push(`+${formatTry(calc.savedAmount)} tasarruf`)
+    if (calc.missedAmount > 0) parts.push(`${formatTry(calc.missedAmount)} kaçırılan`)
+    setFlash(parts.join(' · '))
+  }
+
   return (
     <SafeAreaView style={styles.safe} edges={['top']}>
       <View style={styles.header}>
-        <View>
+        <View style={{ flex: 1 }}>
           <Text style={styles.brand}>Ev Stok</Text>
           <Text style={styles.tagline}>{family?.name ?? 'Aile listesi'}</Text>
         </View>
+        <Button
+          label={hasCache ? 'Tekrar hesapla' : 'Hesapla'}
+          onPress={goCalculate}
+          variant={hasCache ? 'secondary' : 'primary'}
+        />
       </View>
 
+      {hasCache ? (
+        <Banner text="Bütçe hazır. Alındı + market seçince tasarruf bilançoya düşer." tone="ok" />
+      ) : (
+        <Banner text="Önce Hesapla’ya bas. Sonra alındı marketi seçince bilanço dolar." />
+      )}
+      {flash ? <Banner text={flash} tone="ok" /> : null}
       {syncError ? <Banner text={syncError} tone="err" /> : null}
 
       <View style={styles.stats}>
@@ -111,7 +195,7 @@ export default function ListScreen() {
         renderItem={({ item }) => (
           <ItemRow
             item={item}
-            onToggle={() => void togglePurchased(item.id)}
+            onToggle={() => onToggle(item)}
             onEdit={() => {
               setEditing(item)
               setFormOpen(true)
@@ -135,6 +219,16 @@ export default function ListScreen() {
         }}
         onDelete={editing ? () => void removeItem(editing.id) : undefined}
       />
+
+      <PurchasePlaceModal
+        open={placeItem != null}
+        itemName={placeItem?.name ?? ''}
+        offers={placeItem ? getLineForItem(placeItem.id)?.offers ?? [] : null}
+        onClose={() => setPlaceItem(null)}
+        onConfirm={(place) => {
+          void onPlaceConfirm(place)
+        }}
+      />
     </SafeAreaView>
   )
 }
@@ -147,6 +241,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
+    gap: 12,
   },
   brand: {
     fontSize: 28,

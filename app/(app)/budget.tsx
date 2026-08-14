@@ -1,0 +1,351 @@
+import { useLocalSearchParams, useRouter } from 'expo-router'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import {
+  ActivityIndicator,
+  Pressable,
+  ScrollView,
+  StyleSheet,
+  Text,
+  View,
+} from 'react-native'
+import { SafeAreaView } from 'react-native-safe-area-context'
+import { Banner, Button, Screen, Subtitle, Title } from '../../src/components/ui'
+import { useBudgetCache } from '../../src/context/BudgetCacheContext'
+import { useItems } from '../../src/context/ItemsContext'
+import { buildLiveBudgetPlans, formatTry } from '../../src/lib/budgetPlanner'
+import { chainById } from '../../src/lib/chains'
+import { resolveLiveLocation } from '../../src/lib/location'
+import { colors } from '../../src/theme/colors'
+import type { BudgetPlan, BudgetResult } from '../../src/types/budget'
+
+export default function BudgetScreen() {
+  const router = useRouter()
+  const params = useLocalSearchParams<{ autostart?: string }>()
+  const { items } = useItems()
+  const { result: cached, setResult: setCache, hasCache, calculatedAt } = useBudgetCache()
+  const pending = useMemo(() => items.filter((i) => !i.purchased), [items])
+
+  const [loading, setLoading] = useState(false)
+  const [result, setResult] = useState<BudgetResult | null>(cached)
+  const [selectedId, setSelectedId] = useState<string | null>(cached?.plans[0]?.id ?? null)
+  const [error, setError] = useState<string | null>(null)
+  const [status, setStatus] = useState<string | null>(null)
+  const autoStarted = useRef(false)
+
+  const selected: BudgetPlan | null =
+    result?.plans.find((p) => p.id === selectedId) ?? result?.plans[0] ?? null
+
+  const runPlanner = useCallback(async () => {
+    if (pending.length === 0) {
+      setError('Alınacak ürün yok. Önce listeye ürün ekle.')
+      setResult(null)
+      setCache(null)
+      return
+    }
+    setLoading(true)
+    setError(null)
+    setStatus('Anlık konum alınıyor…')
+    try {
+      const loc = await resolveLiveLocation()
+      setStatus(
+        `Konum: ${loc.label} — marketfiyati.org.tr’den ${pending.length} ürün için canlı fiyat çekiliyor…`,
+      )
+      const next = await buildLiveBudgetPlans({
+        pendingItems: pending,
+        latitude: loc.lat,
+        longitude: loc.lng,
+        locationLabel: loc.label,
+        distanceKm: 5,
+      })
+      setResult(next)
+      setCache(next)
+      setSelectedId(next.plans[0]?.id ?? null)
+      setStatus(null)
+      if (next.plans.length === 0) {
+        setError('Yakındaki marketlerde bu ürünler için fiyat bulunamadı.')
+      }
+    } catch (err) {
+      setResult(null)
+      setError(err instanceof Error ? err.message : 'Plan oluşturulamadı')
+      setStatus(null)
+    } finally {
+      setLoading(false)
+    }
+  }, [pending, setCache])
+
+  useEffect(() => {
+    if (params.autostart === '1' && !autoStarted.current && !loading) {
+      autoStarted.current = true
+      void runPlanner()
+      router.setParams({ autostart: undefined })
+    }
+  }, [params.autostart, loading, runPlanner, router])
+
+  useEffect(() => {
+    if (cached && !result) {
+      setResult(cached)
+      setSelectedId(cached.plans[0]?.id ?? null)
+    }
+  }, [cached, result])
+
+  return (
+    <SafeAreaView style={styles.safe} edges={['top']}>
+      <Screen style={styles.screen}>
+        <Title>Bütçe planı</Title>
+        <Subtitle>
+          Bir kez hesapla; sonra listeden ürünü “Alındı” yapıp market seçince tasarruf bilançoya
+          anında yazılır.
+        </Subtitle>
+
+        <View style={styles.row}>
+          <Text style={styles.meta}>{pending.length} alınacak ürün</Text>
+          <Button
+            label={loading ? 'Hesaplanıyor…' : hasCache ? 'Tekrar hesapla' : 'Canlı planları hesapla'}
+            onPress={runPlanner}
+            loading={loading}
+          />
+        </View>
+
+        {hasCache && calculatedAt ? (
+          <Banner
+            text={`Son hesap hazır (${new Date(calculatedAt).toLocaleTimeString('tr-TR')}). Listeye dönüp alındı + market seçebilirsin.`}
+            tone="ok"
+          />
+        ) : (
+          <Banner text="Önce buradan hesapla. Hesap yokken alınan ürünler bilançoya fiyat yansıtmaz." />
+        )}
+
+        {status ? <Banner text={status} tone="ok" /> : null}
+        {error ? <Banner text={error} tone="err" /> : null}
+
+        {loading ? (
+          <View style={styles.center}>
+            <ActivityIndicator color={colors.brand} size="large" />
+          </View>
+        ) : null}
+
+        {result ? (
+          <ScrollView contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
+            <Banner
+              text={`Konum: ${result.locationLabel} (${result.location.lat.toFixed(4)}, ${result.location.lng.toFixed(4)})`}
+              tone="ok"
+            />
+            <Banner text={result.disclaimer} />
+
+            {result.potentialSaving > 0 ? (
+              <View style={styles.savingCard}>
+                <Text style={styles.savingLabel}>Potansiyel tasarruf</Text>
+                <Text style={styles.savingValue}>
+                  {formatTry(result.potentialSaving)} kar edebilirsin
+                </Text>
+                <Text style={styles.savingHint}>
+                  En pahalı tek-zincire göre ({formatTry(result.worstSingleTotal)}) en ucuz plan (
+                  {formatTry(result.bestTotal)}).
+                </Text>
+              </View>
+            ) : null}
+
+            <Text style={styles.section}>Önerilen planlar</Text>
+            {result.plans.map((plan) => {
+              const active = selected?.id === plan.id
+              const chainColor = plan.chainId ? chainById(plan.chainId).color : colors.brand
+              return (
+                <Pressable
+                  key={plan.id}
+                  onPress={() => setSelectedId(plan.id)}
+                  style={[styles.planCard, active && styles.planCardActive]}
+                >
+                  <View style={styles.planTop}>
+                    <View style={[styles.dot, { backgroundColor: chainColor }]} />
+                    <View style={{ flex: 1 }}>
+                      <Text style={styles.planTitle}>{plan.title}</Text>
+                      <Text style={styles.planSub}>{plan.subtitle}</Text>
+                    </View>
+                    <Text style={styles.planTotal}>{formatTry(plan.total)}</Text>
+                  </View>
+                  <Text style={styles.planMeta}>
+                    {plan.availableCount} var
+                    {plan.missingCount ? ` · ${plan.missingCount} yok` : ' · hepsi tamam'}
+                  </Text>
+                </Pressable>
+              )
+            })}
+
+            {selected ? (
+              <>
+                <Text style={styles.section}>Bu planda var ({selected.availableCount})</Text>
+                {selected.lines.map((line) => (
+                  <View key={`${selected.id}-ok-${line.itemId}`} style={styles.line}>
+                    <View style={styles.badgeOk}>
+                      <Text style={styles.badgeOkText}>Var</Text>
+                    </View>
+                    <View style={{ flex: 1 }}>
+                      <Text style={styles.lineName}>
+                        {line.itemName} × {line.qty} {line.unit}
+                      </Text>
+                      {line.catalogName ? (
+                        <Text style={styles.lineMatch}>Eşleşen: {line.catalogName}</Text>
+                      ) : null}
+                      <Text style={styles.lineStore}>
+                        {line.chainName} · {line.storeName} · {formatTry(line.unitPrice)}
+                      </Text>
+                    </View>
+                    <Text style={styles.lineTotal}>{formatTry(line.lineTotal)}</Text>
+                  </View>
+                ))}
+
+                {selected.missingCount > 0 ? (
+                  <>
+                    <Text style={styles.section}>Bu planda yok ({selected.missingCount})</Text>
+                    {selected.missingItems.map((miss) => (
+                      <View key={`${selected.id}-miss-${miss.itemId}`} style={styles.lineMissing}>
+                        <View style={styles.badgeNo}>
+                          <Text style={styles.badgeNoText}>Yok</Text>
+                        </View>
+                        <View style={{ flex: 1 }}>
+                          <Text style={styles.lineName}>{miss.itemName}</Text>
+                          {miss.alternative ? (
+                            <Text style={styles.lineStore}>
+                              Alternatif: {miss.alternative.chainName} ·{' '}
+                              {formatTry(miss.alternative.unitPrice)}
+                            </Text>
+                          ) : (
+                            <Text style={styles.lineStore}>Fiyat/eşleşme yok</Text>
+                          )}
+                        </View>
+                      </View>
+                    ))}
+                  </>
+                ) : null}
+
+                <View style={styles.totalBox}>
+                  <Text style={styles.totalLabel}>Plan toplamı</Text>
+                  <Text style={styles.totalValue}>{formatTry(selected.total)}</Text>
+                </View>
+
+                <Button
+                  label="Listeye dön · alındı işaretle"
+                  variant="secondary"
+                  onPress={() => router.push('/(app)')}
+                />
+              </>
+            ) : null}
+          </ScrollView>
+        ) : null}
+      </Screen>
+    </SafeAreaView>
+  )
+}
+
+const styles = StyleSheet.create({
+  safe: { flex: 1, backgroundColor: colors.bg },
+  screen: { paddingTop: 8, paddingBottom: 0 },
+  row: { marginTop: 16, marginBottom: 8, gap: 10 },
+  meta: { color: colors.inkMuted, fontWeight: '600' },
+  center: { marginTop: 40, alignItems: 'center' },
+  content: { paddingBottom: 40, gap: 4 },
+  savingCard: {
+    backgroundColor: colors.okSoft,
+    borderRadius: 16,
+    padding: 16,
+    marginBottom: 8,
+  },
+  savingLabel: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: colors.ok,
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+  },
+  savingValue: {
+    marginTop: 4,
+    fontSize: 22,
+    fontWeight: '800',
+    color: colors.ok,
+  },
+  savingHint: {
+    marginTop: 6,
+    fontSize: 13,
+    lineHeight: 18,
+    color: colors.inkMuted,
+  },
+  section: {
+    marginTop: 18,
+    marginBottom: 8,
+    fontSize: 16,
+    fontWeight: '700',
+    color: colors.ink,
+  },
+  planCard: {
+    backgroundColor: colors.bgElevated,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: colors.border,
+    padding: 14,
+    marginBottom: 8,
+  },
+  planCardActive: {
+    borderColor: colors.brand,
+    backgroundColor: '#EAF2EE',
+  },
+  planTop: { flexDirection: 'row', alignItems: 'center', gap: 10 },
+  dot: { width: 10, height: 10, borderRadius: 5 },
+  planTitle: { fontSize: 15, fontWeight: '700', color: colors.ink },
+  planSub: { marginTop: 2, fontSize: 12, color: colors.inkMuted },
+  planTotal: { fontSize: 15, fontWeight: '800', color: colors.brand },
+  planMeta: { marginTop: 8, fontSize: 12, color: colors.inkMuted },
+  line: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 10,
+    backgroundColor: colors.bgElevated,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: colors.border,
+    padding: 12,
+    marginBottom: 8,
+  },
+  lineMissing: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 10,
+    backgroundColor: colors.warnSoft,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#F5D0A9',
+    padding: 12,
+    marginBottom: 8,
+  },
+  badgeOk: {
+    backgroundColor: colors.okSoft,
+    borderRadius: 8,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    marginTop: 2,
+  },
+  badgeOkText: { color: colors.ok, fontWeight: '800', fontSize: 11 },
+  badgeNo: {
+    backgroundColor: colors.dangerSoft,
+    borderRadius: 8,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    marginTop: 2,
+  },
+  badgeNoText: { color: colors.danger, fontWeight: '800', fontSize: 11 },
+  lineName: { fontSize: 15, fontWeight: '700', color: colors.ink },
+  lineMatch: { marginTop: 2, fontSize: 11, color: colors.brandSoft },
+  lineStore: { marginTop: 2, fontSize: 12, color: colors.inkMuted, lineHeight: 17 },
+  lineTotal: { fontSize: 14, fontWeight: '800', color: colors.brand },
+  totalBox: {
+    marginTop: 8,
+    marginBottom: 12,
+    backgroundColor: colors.brand,
+    borderRadius: 14,
+    padding: 16,
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+  },
+  totalLabel: { color: '#D7E8DF', fontWeight: '700' },
+  totalValue: { color: '#fff', fontSize: 20, fontWeight: '800' },
+})

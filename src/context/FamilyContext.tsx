@@ -17,9 +17,12 @@ type FamilyContextValue = {
   family: Family | null
   members: FamilyMember[]
   loading: boolean
+  myRole: 'owner' | 'member' | null
   refresh: () => Promise<void>
   createFamily: (name: string) => Promise<void>
   joinFamily: (inviteCode: string) => Promise<void>
+  removeMember: (userId: string) => Promise<void>
+  leaveFamily: () => Promise<void>
 }
 
 const FamilyContext = createContext<FamilyContextValue | null>(null)
@@ -201,9 +204,88 @@ export function FamilyProvider({ children }: { children: ReactNode }) {
     [user, refresh],
   )
 
+  const myRole = useMemo(() => {
+    if (!user) return null
+    return members.find((m) => m.userId === user.id)?.role ?? null
+  }, [members, user])
+
+  const removeMember = useCallback(
+    async (targetUserId: string) => {
+      if (!user || !family) throw new Error('Aile bulunamadı')
+      if (myRole !== 'owner') throw new Error('Sadece kurucu üye çıkarabilir')
+      if (targetUserId === user.id) throw new Error('Kendini çıkarmak için Aileden ayrıl kullan')
+
+      const target = members.find((m) => m.userId === targetUserId)
+      if (!target) throw new Error('Üye bulunamadı')
+      if (target.role === 'owner') throw new Error('Kurucu çıkarılamaz')
+
+      if (isCloudEnabled && supabase) {
+        const { error } = await supabase
+          .from('family_members')
+          .delete()
+          .eq('family_id', family.id)
+          .eq('user_id', targetUserId)
+        if (error) throw error
+        await refresh()
+        return
+      }
+
+      await localStore.removeMember(family.id, targetUserId)
+      await refresh()
+    },
+    [user, family, myRole, members, refresh],
+  )
+
+  const leaveFamily = useCallback(async () => {
+    if (!user || !family) throw new Error('Aile bulunamadı')
+    const me = members.find((m) => m.userId === user.id)
+    if (!me) throw new Error('Üyelik bulunamadı')
+
+    if (me.role === 'owner') {
+      const otherMembers = members.filter((m) => m.userId !== user.id)
+      if (otherMembers.length > 0) {
+        throw new Error('Kurucu ayrılmadan önce diğer üyeleri çıkarmalı')
+      }
+    }
+
+    if (isCloudEnabled && supabase) {
+      const { error } = await supabase
+        .from('family_members')
+        .delete()
+        .eq('family_id', family.id)
+        .eq('user_id', user.id)
+      if (error) throw error
+      await refresh()
+      return
+    }
+
+    await localStore.removeMember(family.id, user.id)
+    await refresh()
+  }, [user, family, members, refresh])
+
   const value = useMemo(
-    () => ({ family, members, loading, refresh, createFamily, joinFamily }),
-    [family, members, loading, refresh, createFamily, joinFamily],
+    () => ({
+      family,
+      members,
+      loading,
+      myRole,
+      refresh,
+      createFamily,
+      joinFamily,
+      removeMember,
+      leaveFamily,
+    }),
+    [
+      family,
+      members,
+      loading,
+      myRole,
+      refresh,
+      createFamily,
+      joinFamily,
+      removeMember,
+      leaveFamily,
+    ],
   )
 
   return <FamilyContext.Provider value={value}>{children}</FamilyContext.Provider>
