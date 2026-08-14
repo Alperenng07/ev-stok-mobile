@@ -73,7 +73,7 @@ export default function BudgetScreen() {
         latitude: loc.lat,
         longitude: loc.lng,
         locationLabel: loc.label,
-        distanceKm: 5,
+        distanceKm: 8,
       })
       setResult(next)
       setCache(next)

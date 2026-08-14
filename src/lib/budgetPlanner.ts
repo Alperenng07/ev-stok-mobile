@@ -141,7 +141,7 @@ export async function buildLiveBudgetPlans(options: {
   distanceKm?: number
 }): Promise<BudgetResult> {
   const { pendingItems, latitude, longitude, locationLabel } = options
-  const distanceKm = options.distanceKm ?? 5
+  const distanceKm = options.distanceKm ?? 8
 
   const lines: PricedLine[] = []
 

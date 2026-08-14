@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import {
   ActivityIndicator,
   Pressable,
@@ -7,7 +7,14 @@ import {
   TextInput,
   View,
 } from 'react-native'
-import { searchPlaces } from '../lib/geocode'
+import { WebView } from 'react-native-webview'
+import {
+  buildMapPickerHtml,
+  DEFAULT_MAP_CENTER,
+  isValidTurkeyCoord,
+  reverseGeocode,
+  searchPlaces,
+} from '../lib/geocode'
 import { resolveLiveLocation } from '../lib/location'
 import { locationPrefsStore } from '../lib/locationPrefsStore'
 import { colors } from '../theme/colors'
@@ -19,8 +26,11 @@ type Props = {
   onChange: (prefs: LocationPreference) => void
 }
 
+type AddMode = 'address' | 'map' | 'gps'
+
 export function LocationPicker({ prefs, onChange }: Props) {
   const [adding, setAdding] = useState(false)
+  const [addMode, setAddMode] = useState<AddMode>('address')
   const [name, setName] = useState('Ev')
   const [query, setQuery] = useState('')
   const [hits, setHits] = useState<GeocodeHit[]>([])
@@ -28,21 +38,30 @@ export function LocationPicker({ prefs, onChange }: Props) {
   const [busy, setBusy] = useState(false)
   const [msg, setMsg] = useState<string | null>(null)
   const [err, setErr] = useState<string | null>(null)
+  const [mapPin, setMapPin] = useState(DEFAULT_MAP_CENTER)
+  const [mapLabel, setMapLabel] = useState('Haritadan seçilen nokta')
+  const [mapKey, setMapKey] = useState(0)
+
+  const mapHtml = useMemo(
+    () => buildMapPickerHtml(mapPin.lat, mapPin.lng),
+    // Yeniden kurulum yalnızca mapKey ile (GPS merkezleme)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [mapKey],
+  )
 
   useEffect(() => {
-    if (!adding || query.trim().length < 2) {
-      setHits([])
-      return
-    }
-    setSearching(true)
+    if (!adding || addMode !== 'map') return
+    let cancelled = false
     const t = setTimeout(() => {
-      void searchPlaces(query)
-        .then(setHits)
-        .catch(() => setHits([]))
-        .finally(() => setSearching(false))
-    }, 350)
-    return () => clearTimeout(t)
-  }, [adding, query])
+      void reverseGeocode(mapPin.lat, mapPin.lng).then((hit) => {
+        if (!cancelled && hit) setMapLabel(hit.label)
+      })
+    }, 280)
+    return () => {
+      cancelled = true
+      clearTimeout(t)
+    }
+  }, [adding, addMode, mapPin.lat, mapPin.lng])
 
   async function persist(next: LocationPreference) {
     await locationPrefsStore.save(next)
@@ -68,6 +87,10 @@ export function LocationPicker({ prefs, onChange }: Props) {
   }
 
   function addPlace(place: Omit<ShoppingLocation, 'id' | 'createdAt'>) {
+    if (!isValidTurkeyCoord(place.lat, place.lng)) {
+      setErr('Seçilen nokta Türkiye dışında. Haritadan veya adresle yeniden dene.')
+      return
+    }
     const next: ShoppingLocation = {
       ...place,
       id: crypto.randomUUID(),
@@ -80,6 +103,26 @@ export function LocationPicker({ prefs, onChange }: Props) {
     setHits([])
     setMsg(`“${next.name}” kaydedildi ve seçildi.`)
     setErr(null)
+  }
+
+  async function runAddressSearch() {
+    const q = query.trim()
+    if (q.length < 3) {
+      setErr('En az 3 karakterlik açık adres yaz (mahalle, cadde, semt…).')
+      return
+    }
+    setSearching(true)
+    setErr(null)
+    try {
+      const found = await searchPlaces(q)
+      setHits(found)
+      if (found.length === 0) setErr('Adres bulunamadı. Daha açık yaz veya haritadan seç.')
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : 'Adres araması başarısız')
+      setHits([])
+    } finally {
+      setSearching(false)
+    }
   }
 
   async function saveCurrent() {
@@ -106,14 +149,48 @@ export function LocationPicker({ prefs, onChange }: Props) {
   }
 
   function saveHit(hit: GeocodeHit) {
-    const trimmed = name.trim() || hit.name
     addPlace({
-      name: trimmed,
+      name: name.trim() || hit.name,
       lat: hit.lat,
       lng: hit.lng,
       label: hit.label,
     })
   }
+
+  function saveMapPin() {
+    addPlace({
+      name: name.trim() || 'Harita konumu',
+      lat: mapPin.lat,
+      lng: mapPin.lng,
+      label: mapLabel,
+    })
+  }
+
+  async function centerMapOnGps() {
+    setBusy(true)
+    setErr(null)
+    try {
+      const loc = await resolveLiveLocation()
+      setMapPin({ lat: loc.lat, lng: loc.lng })
+      setMapLabel(loc.label)
+      setMapKey((k) => k + 1)
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : 'Konum alınamadı')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const onMapMessage = useCallback((raw: string) => {
+    try {
+      const data = JSON.parse(raw) as { type?: string; lat?: number; lng?: number }
+      if (data.type !== 'pick') return
+      if (!Number.isFinite(data.lat) || !Number.isFinite(data.lng)) return
+      setMapPin({ lat: data.lat!, lng: data.lng! })
+    } catch {
+      /* ignore */
+    }
+  }, [])
 
   const selected = prefs.places.find((p) => p.id === prefs.savedId)
 
@@ -121,12 +198,18 @@ export function LocationPicker({ prefs, onChange }: Props) {
     <View style={styles.wrap}>
       <View style={styles.head}>
         <Text style={styles.label}>Alışveriş konumu</Text>
-        <Pressable onPress={() => setAdding((v) => !v)}>
+        <Pressable
+          onPress={() => {
+            setAdding((v) => !v)
+            setErr(null)
+            setMsg(null)
+          }}
+        >
           <Text style={styles.addLink}>{adding ? 'Kapat' : '+ Konum ekle'}</Text>
         </Pressable>
       </View>
       <Text style={styles.hint}>
-        İşteyken eve göre hesaplamak için “Ev” kaydet; hesaplamada onu seç.
+        İşteyken eve göre hesapla: açık adres yaz veya haritadan pin koy, sonra “Ev” seç.
       </Text>
 
       <View style={styles.chips}>
@@ -155,6 +238,8 @@ export function LocationPicker({ prefs, onChange }: Props) {
       {prefs.mode === 'saved' && selected ? (
         <Text style={styles.selected}>
           {selected.name}: {selected.label}
+          {'\n'}
+          {selected.lat.toFixed(5)}, {selected.lng.toFixed(5)}
         </Text>
       ) : (
         <Text style={styles.selectedMuted}>Hesaplama cihazının anlık GPS konumuna göre yapılır.</Text>
@@ -173,27 +258,88 @@ export function LocationPicker({ prefs, onChange }: Props) {
             placeholderTextColor={colors.inkMuted}
             style={styles.input}
           />
-          <Button
-            label={busy ? 'Konum alınıyor…' : 'Şu anki konumumu kaydet'}
-            variant="secondary"
-            onPress={() => void saveCurrent()}
-            loading={busy}
-          />
-          <Text style={[styles.fieldLabel, { marginTop: 12 }]}>veya adres / semt ara</Text>
-          <TextInput
-            value={query}
-            onChangeText={setQuery}
-            placeholder="Örn. Kadıköy, Çankaya…"
-            placeholderTextColor={colors.inkMuted}
-            style={styles.input}
-          />
-          {searching ? <ActivityIndicator color={colors.brand} style={{ marginTop: 8 }} /> : null}
-          {hits.map((h) => (
-            <Pressable key={h.id} onPress={() => saveHit(h)} style={styles.hit}>
-              <Text style={styles.hitName}>{h.name}</Text>
-              <Text style={styles.hitLabel}>{h.label}</Text>
-            </Pressable>
-          ))}
+
+          <View style={styles.chips}>
+            {([
+              ['address', 'Açık adres'],
+              ['map', 'Harita'],
+              ['gps', 'Anlık GPS'],
+            ] as const).map(([id, label]) => (
+              <Pressable
+                key={id}
+                onPress={() => setAddMode(id)}
+                style={[styles.chip, addMode === id && styles.chipActive]}
+              >
+                <Text style={[styles.chipText, addMode === id && styles.chipTextActive]}>
+                  {label}
+                </Text>
+              </Pressable>
+            ))}
+          </View>
+
+          {addMode === 'address' ? (
+            <>
+              <Text style={styles.fieldLabel}>Açık adres</Text>
+              <TextInput
+                value={query}
+                onChangeText={setQuery}
+                placeholder="Caferağa Mah. Moda Cad. No:12 Kadıköy İstanbul"
+                placeholderTextColor={colors.inkMuted}
+                style={[styles.input, styles.textarea]}
+                multiline
+              />
+              <Button
+                label={searching ? 'Aranıyor…' : 'Adresi bul'}
+                variant="secondary"
+                onPress={() => void runAddressSearch()}
+                loading={searching}
+              />
+              {hits.map((h) => (
+                <Pressable key={h.id} onPress={() => saveHit(h)} style={styles.hit}>
+                  <Text style={styles.hitName}>{h.name}</Text>
+                  <Text style={styles.hitLabel}>{h.label}</Text>
+                  <Text style={styles.hitLabel}>
+                    {h.lat.toFixed(5)}, {h.lng.toFixed(5)}
+                  </Text>
+                </Pressable>
+              ))}
+            </>
+          ) : null}
+
+          {addMode === 'map' ? (
+            <>
+              <View style={styles.mapWrap}>
+                <WebView
+                  key={mapKey}
+                  originWhitelist={['*']}
+                  source={{ html: mapHtml }}
+                  style={styles.map}
+                  onMessage={(e) => onMapMessage(e.nativeEvent.data)}
+                  javaScriptEnabled
+                  domStorageEnabled
+                  setSupportMultipleWindows={false}
+                />
+              </View>
+              <Text style={styles.selected}>{mapLabel}</Text>
+              <Button
+                label={busy ? 'Konum alınıyor…' : 'Haritayı anlık konuma getir'}
+                variant="secondary"
+                onPress={() => void centerMapOnGps()}
+                loading={busy}
+              />
+              <Button label="Bu pin’i kaydet" onPress={saveMapPin} />
+            </>
+          ) : null}
+
+          {addMode === 'gps' ? (
+            <Button
+              label={busy ? 'Konum alınıyor…' : 'Şu anki konumumu kaydet'}
+              variant="secondary"
+              onPress={() => void saveCurrent()}
+              loading={busy}
+            />
+          ) : null}
+
           {prefs.places.map((p) => (
             <View key={p.id} style={styles.manageRow}>
               <View style={{ flex: 1 }}>
@@ -205,6 +351,8 @@ export function LocationPicker({ prefs, onChange }: Props) {
               </Pressable>
             </View>
           ))}
+
+          {searching ? <ActivityIndicator color={colors.brand} /> : null}
         </View>
       ) : null}
     </View>
@@ -233,7 +381,7 @@ const styles = StyleSheet.create({
     fontSize: 13,
     lineHeight: 18,
   },
-  chips: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
+  chips: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginBottom: 4 },
   chip: {
     borderWidth: 1,
     borderColor: colors.border,
@@ -253,6 +401,7 @@ const styles = StyleSheet.create({
     color: colors.brand,
     fontWeight: '600',
     fontSize: 13,
+    lineHeight: 18,
   },
   selectedMuted: {
     marginTop: 10,
@@ -284,6 +433,18 @@ const styles = StyleSheet.create({
     color: colors.ink,
     backgroundColor: colors.bg,
   },
+  textarea: {
+    minHeight: 78,
+    textAlignVertical: 'top',
+  },
+  mapWrap: {
+    height: 260,
+    borderRadius: 12,
+    overflow: 'hidden',
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  map: { flex: 1, backgroundColor: '#e8ece5' },
   hit: {
     paddingVertical: 10,
     borderBottomWidth: 1,

@@ -111,7 +111,7 @@ export async function searchMarketPrices(options: {
       keywords,
       latitude: options.latitude,
       longitude: options.longitude,
-      distance: options.distanceKm ?? 5,
+      distance: options.distanceKm ?? 8,
       size: options.size ?? 20,
     }),
   })
