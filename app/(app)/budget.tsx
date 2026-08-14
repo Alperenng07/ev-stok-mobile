@@ -63,7 +63,8 @@ export default function BudgetScreen() {
   const selected: BudgetPlan | null =
     result?.plans.find((p) => p.id === selectedId) ?? result?.plans[0] ?? null
 
-  const runPlanner = useCallback(async () => {
+  const runPlanner = useCallback(async (prefsOverride?: LocationPreference) => {
+    const activePrefs = prefsOverride ?? locPrefs
     if (pending.length === 0) {
       setError('Alınacak ürün yok. Önce listeye ürün ekle.')
       setResult(null)
@@ -73,10 +74,10 @@ export default function BudgetScreen() {
     setLoading(true)
     setError(null)
     setStatus(
-      locPrefs.mode === 'saved' ? 'Kayıtlı konum yükleniyor…' : 'Anlık konum alınıyor…',
+      activePrefs.mode === 'saved' ? 'Kayıtlı konum yükleniyor…' : 'Anlık konum alınıyor…',
     )
     try {
-      const loc = await resolveBudgetLocation(locPrefs)
+      const loc = await resolveBudgetLocation(activePrefs)
       setStatus(
         `Konum: ${loc.label} — marketfiyati.org.tr’den ${pending.length} ürün için canlı fiyat çekiliyor…`,
       )
@@ -124,6 +125,7 @@ export default function BudgetScreen() {
     }
   }, [cached, result])
 
+  // Konum değişince eski cache’i temizle (hesap seçim/buton ile tetiklenir)
   useEffect(() => {
     if (!prefsReady) return
     if (lastLocKey.current === null) {
@@ -136,8 +138,7 @@ export default function BudgetScreen() {
     setCache(null)
     setSelectedId(null)
     setError(null)
-    if (pending.length > 0) void runPlanner()
-  }, [prefsReady, locationKey, pending.length, runPlanner, setCache])
+  }, [prefsReady, locationKey, setCache])
 
   function chooseCatalog(itemId: string, catalogId: string) {
     if (!result) return
@@ -157,13 +158,29 @@ export default function BudgetScreen() {
           anında yazılır.
         </Subtitle>
 
-        <LocationPicker prefs={locPrefs} onChange={setLocPrefs} />
+        <LocationPicker
+          prefs={locPrefs}
+          onChange={setLocPrefs}
+          onUseLocation={(nextPrefs) => {
+            const place =
+              nextPrefs.mode === 'saved' && nextPrefs.savedId
+                ? nextPrefs.places.find((p) => p.id === nextPrefs.savedId)
+                : null
+            lastLocKey.current = place
+              ? `saved:${place.id}:${place.lat.toFixed(5)},${place.lng.toFixed(5)}`
+              : nextPrefs.mode === 'saved' && nextPrefs.savedId
+                ? `saved:${nextPrefs.savedId}`
+                : 'live'
+            setLocPrefs(nextPrefs)
+            void runPlanner(nextPrefs)
+          }}
+        />
 
         <View style={styles.row}>
           <Text style={styles.meta}>{pending.length} alınacak ürün</Text>
           <Button
             label={loading ? 'Hesaplanıyor…' : hasCache ? 'Tekrar hesapla' : 'Canlı planları hesapla'}
-            onPress={runPlanner}
+            onPress={() => void runPlanner()}
             loading={loading}
           />
         </View>
