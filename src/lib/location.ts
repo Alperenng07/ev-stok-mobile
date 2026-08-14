@@ -60,8 +60,10 @@ export async function resolveLiveLocation(): Promise<UserLocation> {
     const places = await Location.reverseGeocodeAsync({ latitude: lat, longitude: lng })
     const p = places[0]
     if (p) {
-      const parts = [p.district, p.subregion || p.city, p.region].filter(Boolean)
-      label = parts.filter((v, i, arr) => arr.indexOf(v) === i).slice(0, 3).join(', ') || label
+      const parts = [p.street, p.district, p.subregion || p.city, p.region].filter(Boolean)
+      const placeLabel =
+        parts.filter((v, i, arr) => arr.indexOf(v) === i).slice(0, 4).join(', ') || label
+      label = `${placeLabel} (${lat.toFixed(5)}, ${lng.toFixed(5)})`
     }
   } catch {
     /* optional */

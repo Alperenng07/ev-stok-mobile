@@ -26,13 +26,25 @@ type PhotonResponse = {
   features?: PhotonFeature[]
 }
 
-type OpenMeteoResult = {
-  id?: number
+type NominatimItem = {
+  place_id?: number
+  lat?: string
+  lon?: string
+  display_name?: string
   name?: string
-  latitude?: number
-  longitude?: number
-  admin1?: string
-  admin2?: string
+  address?: {
+    road?: string
+    pedestrian?: string
+    neighbourhood?: string
+    suburb?: string
+    city_district?: string
+    district?: string
+    town?: string
+    city?: string
+    province?: string
+    state?: string
+    postcode?: string
+  }
 }
 
 export type StructuredAddress = {
@@ -51,6 +63,21 @@ export type StructuredAddress = {
 }
 
 const TR_BIAS = { lat: 39.0, lon: 35.0 }
+const NOMINATIM_UA = 'EvStok/1.0 (https://github.com/Alperenng07/ev-stok; household list app)'
+
+function normalizeTr(text: string): string {
+  return text
+    .toLocaleLowerCase('tr')
+    .replace(/ı/g, 'i')
+    .replace(/ğ/g, 'g')
+    .replace(/ü/g, 'u')
+    .replace(/ş/g, 's')
+    .replace(/ö/g, 'o')
+    .replace(/ç/g, 'c')
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
 
 function labelFromPhoton(p: PhotonProps): { name: string; label: string } {
   const streetLine = [p.housenumber, p.street || p.name].filter(Boolean).join(' ').trim()
@@ -86,12 +113,68 @@ function fromPhoton(features: PhotonFeature[] | undefined): GeocodeHit[] {
     .filter((h): h is GeocodeHit => h != null)
 }
 
+function fromNominatim(items: NominatimItem[]): GeocodeHit[] {
+  const seen = new Set<string>()
+  return items
+    .map((item, i) => {
+      const lat = Number(item.lat)
+      const lng = Number(item.lon)
+      if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null
+      const addr = item.address
+      const street =
+        addr?.road ||
+        addr?.pedestrian ||
+        item.name ||
+        item.display_name?.split(',')[0]?.trim() ||
+        'Konum'
+      const parts = [
+        street,
+        addr?.neighbourhood || addr?.suburb,
+        addr?.city_district || addr?.district || addr?.town || addr?.city,
+        addr?.province || addr?.state,
+        addr?.postcode,
+      ].filter(Boolean) as string[]
+      const label = parts.filter((v, idx, arr) => arr.indexOf(v) === idx).join(', ')
+      const id = `n-${item.place_id ?? i}-${lat.toFixed(5)},${lng.toFixed(5)}`
+      if (seen.has(id)) return null
+      seen.add(id)
+      return { id, name: street, label: label || item.display_name || street, lat, lng }
+    })
+    .filter((h): h is GeocodeHit => h != null)
+}
+
+/** Sonuç seçilen il / ilçe ile uyuşuyor mu? */
+export function hitMatchesRegion(
+  hit: GeocodeHit,
+  province: string,
+  district?: string,
+): boolean {
+  const hay = normalizeTr(`${hit.name} ${hit.label}`)
+  const p = normalizeTr(province)
+  if (p && !hay.includes(p)) return false
+  if (district?.trim()) {
+    const d = normalizeTr(district)
+    if (d && !hay.includes(d)) return false
+  }
+  return true
+}
+
+function filterByRegion(
+  hits: GeocodeHit[],
+  province: string,
+  district?: string,
+): GeocodeHit[] {
+  const matched = hits.filter((h) => hitMatchesRegion(h, province, district))
+  return matched.length > 0 ? matched : hits.filter((h) => hitMatchesRegion(h, province))
+}
+
 async function searchPhotonFree(query: string, bias?: { lat: number; lng: number }): Promise<GeocodeHit[]> {
   const lat = bias?.lat ?? TR_BIAS.lat
   const lon = bias?.lng ?? TR_BIAS.lon
+  // Photon lang=tr DESTEKLEMİYOR (400); lang gönderme.
   const url =
     `https://photon.komoot.io/api/?q=${encodeURIComponent(query)}` +
-    `&lang=tr&limit=8&lat=${lat}&lon=${lon}`
+    `&limit=8&lat=${lat}&lon=${lon}`
   const res = await fetch(url)
   if (!res.ok) throw new Error('Adres araması başarısız')
   const data = (await res.json()) as PhotonResponse
@@ -102,7 +185,6 @@ async function searchPhotonStructured(parts: StructuredAddress): Promise<Geocode
   const params = new URLSearchParams()
   params.set('countrycode', 'TR')
   params.set('limit', '8')
-  params.set('lang', 'tr')
   if (parts.province.trim()) params.set('state', parts.province.trim())
   if (parts.district.trim()) params.set('city', parts.district.trim())
   if (parts.neighborhood.trim()) params.set('district', parts.neighborhood.trim())
@@ -116,26 +198,36 @@ async function searchPhotonStructured(parts: StructuredAddress): Promise<Geocode
   return fromPhoton(data.features)
 }
 
-async function searchOpenMeteo(query: string): Promise<GeocodeHit[]> {
+async function searchNominatim(query: string): Promise<GeocodeHit[]> {
+  const q = query.trim()
+  if (q.length < 3) return []
   const url =
-    `https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(query)}` +
-    `&count=6&language=tr&countryCode=TR`
-  const res = await fetch(url)
+    `https://nominatim.openstreetmap.org/search?format=jsonv2&addressdetails=1` +
+    `&limit=8&countrycodes=tr&q=${encodeURIComponent(q)}`
+  const res = await fetch(url, {
+    headers: {
+      Accept: 'application/json',
+      'User-Agent': NOMINATIM_UA,
+    },
+  })
   if (!res.ok) return []
-  const data = (await res.json()) as { results?: OpenMeteoResult[] }
-  return (data.results ?? [])
-    .filter((r) => r.name && Number.isFinite(r.latitude) && Number.isFinite(r.longitude))
-    .map((r) => {
-      const parts = [r.name, r.admin2, r.admin1].filter(Boolean) as string[]
-      const label = parts.filter((v, i, arr) => arr.indexOf(v) === i).join(', ')
-      return {
-        id: String(r.id ?? `${r.latitude},${r.longitude}`),
-        name: r.name!,
-        label,
-        lat: Number(r.latitude),
-        lng: Number(r.longitude),
-      }
-    })
+  const data = (await res.json()) as NominatimItem[]
+  return fromNominatim(Array.isArray(data) ? data : [])
+}
+
+async function reverseNominatim(lat: number, lng: number): Promise<GeocodeHit | null> {
+  const url =
+    `https://nominatim.openstreetmap.org/reverse?format=jsonv2&addressdetails=1` +
+    `&lat=${encodeURIComponent(String(lat))}&lon=${encodeURIComponent(String(lng))}`
+  const res = await fetch(url, {
+    headers: {
+      Accept: 'application/json',
+      'User-Agent': NOMINATIM_UA,
+    },
+  })
+  if (!res.ok) return null
+  const data = (await res.json()) as NominatimItem
+  return fromNominatim([data])[0] ?? null
 }
 
 function composeAddressQuery(parts: StructuredAddress): string {
@@ -143,12 +235,13 @@ function composeAddressQuery(parts: StructuredAddress): string {
     parts.street.trim() && parts.buildingNo.trim()
       ? `${parts.street.trim()} No:${parts.buildingNo.trim()}`
       : parts.street.trim(),
-    parts.neighborhood.trim(),
+    parts.neighborhood.trim() ? `${parts.neighborhood.trim()} Mahallesi` : '',
     parts.district.trim(),
     parts.province.trim(),
+    'Türkiye',
   ]
     .filter(Boolean)
-    .join(' ')
+    .join(', ')
 }
 
 export function formatAddressLabel(parts: StructuredAddress): string {
@@ -164,7 +257,19 @@ export function formatAddressLabel(parts: StructuredAddress): string {
     .join(', ')
 }
 
-/** Sokak önerileri: il/ilçe/mahalle bağlamında Photon araması. */
+/** İlçe merkezi yaklaşık koordinatı (sokak araması bias için). */
+export async function resolveDistrictBias(
+  province: string,
+  district: string,
+): Promise<{ lat: number; lng: number } | null> {
+  const hits = await searchNominatim(`${district}, ${province}, Türkiye`)
+  const matched = filterByRegion(hits, province, district)
+  const hit = matched[0] ?? hits[0]
+  if (!hit || !isValidTurkeyCoord(hit.lat, hit.lng)) return null
+  return { lat: hit.lat, lng: hit.lng }
+}
+
+/** Sokak önerileri: il/ilçe/mahalle bağlamında. */
 export async function searchStreetSuggestions(
   streetQuery: string,
   context: Pick<StructuredAddress, 'province' | 'district' | 'neighborhood'>,
@@ -181,25 +286,46 @@ export async function searchStreetSuggestions(
     }
   }
 
+  const areaBias = bias ?? (await resolveDistrictBias(context.province, context.district)) ?? undefined
+
   try {
     pushUnique(
-      await searchPhotonStructured({
-        province: context.province,
-        district: context.district,
-        neighborhood: context.neighborhood,
-        street,
-        buildingNo: '',
-      }),
+      filterByRegion(
+        await searchPhotonStructured({
+          province: context.province,
+          district: context.district,
+          neighborhood: context.neighborhood,
+          street,
+          buildingNo: '',
+        }),
+        context.province,
+        context.district,
+      ),
     )
   } catch {
     /* continue */
   }
 
-  const free = [street, context.neighborhood, context.district, context.province]
+  const free = [
+    street,
+    context.neighborhood ? `${context.neighborhood} Mahallesi` : '',
+    context.district,
+    context.province,
+    'Türkiye',
+  ]
     .filter(Boolean)
-    .join(' ')
+    .join(', ')
+
   try {
-    pushUnique(await searchPhotonFree(free, bias))
+    pushUnique(filterByRegion(await searchNominatim(free), context.province, context.district))
+  } catch {
+    /* continue */
+  }
+
+  try {
+    pushUnique(
+      filterByRegion(await searchPhotonFree(free, areaBias), context.province, context.district),
+    )
   } catch {
     /* continue */
   }
@@ -223,42 +349,57 @@ export async function searchStructuredAddress(
     }
   }
 
+  const areaBias =
+    bias ?? (await resolveDistrictBias(parts.province, parts.district)) ?? undefined
+  const freeQuery = composeAddressQuery(parts)
+
+  // 1) Nominatim — TR sokak adreslerinde en güvenilir ücretsiz kaynak
   try {
-    pushUnique(await searchPhotonStructured(parts))
+    pushUnique(filterByRegion(await searchNominatim(freeQuery), parts.province, parts.district))
   } catch {
     /* continue */
   }
 
-  if (results.length === 0 && parts.street.trim()) {
+  // 2) Photon structured (lang=tr YOK)
+  try {
+    pushUnique(filterByRegion(await searchPhotonStructured(parts), parts.province, parts.district))
+  } catch {
+    /* continue */
+  }
+
+  if (results.length < 3 && parts.street.trim()) {
     try {
-      // Mahalle bazen city/district karışıyor; sokak + ilçe + il ile tekrar dene
       pushUnique(
-        await searchPhotonStructured({
-          ...parts,
-          neighborhood: '',
-        }),
+        filterByRegion(
+          await searchPhotonStructured({ ...parts, neighborhood: '' }),
+          parts.province,
+          parts.district,
+        ),
       )
     } catch {
       /* continue */
     }
   }
 
-  const freeQuery = composeAddressQuery(parts)
   if (results.length < 3 && freeQuery.length >= 3) {
     try {
-      pushUnique(await searchPhotonFree(freeQuery, bias))
+      pushUnique(
+        filterByRegion(await searchPhotonFree(freeQuery, areaBias), parts.province, parts.district),
+      )
     } catch {
       /* continue */
     }
   }
 
-  if (results.length === 0 && freeQuery.length >= 3) {
-    pushUnique(await searchOpenMeteo(freeQuery))
-  }
-
-  // En azından ilçe merkezi
-  if (results.length === 0) {
-    pushUnique(await searchOpenMeteo(`${parts.district.trim()}, ${parts.province.trim()}`))
+  // Son çare: ilçe merkezi (sokak bulunamazsa en azından doğru ilçe)
+  if (results.length === 0 && areaBias) {
+    results.push({
+      id: `district-${parts.district}-${areaBias.lat.toFixed(4)}`,
+      name: parts.district,
+      label: `${parts.neighborhood || parts.district}, ${parts.district}, ${parts.province} (ilçe merkezi ≈)`,
+      lat: areaBias.lat,
+      lng: areaBias.lng,
+    })
   }
 
   return results
@@ -269,21 +410,41 @@ export async function searchPlaces(query: string): Promise<GeocodeHit[]> {
   const q = query.trim()
   if (q.length < 3) return []
   try {
+    const nominatim = await searchNominatim(q)
+    if (nominatim.length > 0) return nominatim
+  } catch {
+    /* fall through */
+  }
+  try {
     const photon = await searchPhotonFree(q)
     if (photon.length > 0) return photon
   } catch {
     /* fall through */
   }
-  return searchOpenMeteo(q)
+  return []
 }
 
 export async function reverseGeocode(lat: number, lng: number): Promise<GeocodeHit | null> {
   if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null
+  try {
+    const nom = await reverseNominatim(lat, lng)
+    if (nom) return nom
+  } catch {
+    /* fall through */
+  }
   const url =
     `https://photon.komoot.io/reverse?lat=${encodeURIComponent(String(lat))}` +
-    `&lon=${encodeURIComponent(String(lng))}&lang=tr&limit=1`
+    `&lon=${encodeURIComponent(String(lng))}&limit=1`
   const res = await fetch(url)
-  if (!res.ok) return null
+  if (!res.ok) {
+    return {
+      id: `${lat.toFixed(5)},${lng.toFixed(5)}`,
+      name: 'Seçilen nokta',
+      label: `${lat.toFixed(5)}, ${lng.toFixed(5)}`,
+      lat,
+      lng,
+    }
+  }
   const data = (await res.json()) as PhotonResponse
   return fromPhoton(data.features)[0] ?? {
     id: `${lat.toFixed(5)},${lng.toFixed(5)}`,
