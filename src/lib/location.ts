@@ -1,4 +1,5 @@
 import * as Location from 'expo-location'
+import type { LocationPreference } from '../types/location'
 
 export type UserLocation = {
   lat: number
@@ -14,7 +15,7 @@ export class LocationError extends Error {
   }
 }
 
-/** Kullanıcının anlık GPS konumunu ister. İzin yoksa hata fırlatır (varsayılan şehir kullanılmaz). */
+/** Kullanıcının anlık GPS konumunu ister. İzin yoksa hata fırlatır. */
 export async function resolveLiveLocation(): Promise<UserLocation> {
   const services = await Location.hasServicesEnabledAsync()
   if (!services) {
@@ -47,6 +48,25 @@ export async function resolveLiveLocation(): Promise<UserLocation> {
   }
 
   return { lat, lng, label, accuracyM }
+}
+
+/** Bütçe hesabı için seçili kaynağı çözümler (anlık veya kayıtlı). */
+export async function resolveBudgetLocation(
+  prefs: LocationPreference,
+): Promise<UserLocation> {
+  if (prefs.mode === 'saved' && prefs.savedId) {
+    const place = prefs.places.find((p) => p.id === prefs.savedId)
+    if (!place) {
+      throw new LocationError('Kayıtlı konum bulunamadı. Yeniden seç veya anlık konum kullan.')
+    }
+    return {
+      lat: place.lat,
+      lng: place.lng,
+      label: `${place.name} · ${place.label}`,
+      accuracyM: null,
+    }
+  }
+  return resolveLiveLocation()
 }
 
 export function haversineKm(aLat: number, aLng: number, bLat: number, bLng: number): number {

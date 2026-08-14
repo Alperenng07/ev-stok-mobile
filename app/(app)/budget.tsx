@@ -9,14 +9,17 @@ import {
   View,
 } from 'react-native'
 import { SafeAreaView } from 'react-native-safe-area-context'
+import { LocationPicker } from '../../src/components/LocationPicker'
 import { Banner, Button, Screen, Subtitle, Title } from '../../src/components/ui'
 import { useBudgetCache } from '../../src/context/BudgetCacheContext'
 import { useItems } from '../../src/context/ItemsContext'
 import { buildLiveBudgetPlans, formatTry } from '../../src/lib/budgetPlanner'
 import { chainById } from '../../src/lib/chains'
-import { resolveLiveLocation } from '../../src/lib/location'
+import { resolveBudgetLocation } from '../../src/lib/location'
+import { locationPrefsStore } from '../../src/lib/locationPrefsStore'
 import { colors } from '../../src/theme/colors'
 import type { BudgetPlan, BudgetResult } from '../../src/types/budget'
+import type { LocationPreference } from '../../src/types/location'
 
 export default function BudgetScreen() {
   const router = useRouter()
@@ -25,12 +28,25 @@ export default function BudgetScreen() {
   const { result: cached, setResult: setCache, hasCache, calculatedAt } = useBudgetCache()
   const pending = useMemo(() => items.filter((i) => !i.purchased), [items])
 
+  const [locPrefs, setLocPrefs] = useState<LocationPreference>({
+    mode: 'live',
+    savedId: null,
+    places: [],
+  })
+  const [prefsReady, setPrefsReady] = useState(false)
   const [loading, setLoading] = useState(false)
   const [result, setResult] = useState<BudgetResult | null>(cached)
   const [selectedId, setSelectedId] = useState<string | null>(cached?.plans[0]?.id ?? null)
   const [error, setError] = useState<string | null>(null)
   const [status, setStatus] = useState<string | null>(null)
   const autoStarted = useRef(false)
+
+  useEffect(() => {
+    void locationPrefsStore.load().then((prefs) => {
+      setLocPrefs(prefs)
+      setPrefsReady(true)
+    })
+  }, [])
 
   const selected: BudgetPlan | null =
     result?.plans.find((p) => p.id === selectedId) ?? result?.plans[0] ?? null
@@ -44,9 +60,11 @@ export default function BudgetScreen() {
     }
     setLoading(true)
     setError(null)
-    setStatus('Anlık konum alınıyor…')
+    setStatus(
+      locPrefs.mode === 'saved' ? 'Kayıtlı konum yükleniyor…' : 'Anlık konum alınıyor…',
+    )
     try {
-      const loc = await resolveLiveLocation()
+      const loc = await resolveBudgetLocation(locPrefs)
       setStatus(
         `Konum: ${loc.label} — marketfiyati.org.tr’den ${pending.length} ürün için canlı fiyat çekiliyor…`,
       )
@@ -71,15 +89,20 @@ export default function BudgetScreen() {
     } finally {
       setLoading(false)
     }
-  }, [pending, setCache])
+  }, [pending, setCache, locPrefs])
 
   useEffect(() => {
-    if (params.autostart === '1' && !autoStarted.current && !loading) {
+    if (
+      prefsReady &&
+      params.autostart === '1' &&
+      !autoStarted.current &&
+      !loading
+    ) {
       autoStarted.current = true
       void runPlanner()
       router.setParams({ autostart: undefined })
     }
-  }, [params.autostart, loading, runPlanner, router])
+  }, [params.autostart, loading, runPlanner, router, prefsReady])
 
   useEffect(() => {
     if (cached && !result) {
@@ -96,6 +119,8 @@ export default function BudgetScreen() {
           Bir kez hesapla; sonra listeden ürünü “Alındı” yapıp market seçince tasarruf bilançoya
           anında yazılır.
         </Subtitle>
+
+        <LocationPicker prefs={locPrefs} onChange={setLocPrefs} />
 
         <View style={styles.row}>
           <Text style={styles.meta}>{pending.length} alınacak ürün</Text>
