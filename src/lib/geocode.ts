@@ -5,6 +5,7 @@ type PhotonProps = {
   street?: string
   housenumber?: string
   district?: string
+  locality?: string
   city?: string
   state?: string
   county?: string
@@ -34,18 +35,29 @@ type OpenMeteoResult = {
   admin2?: string
 }
 
+export type StructuredAddress = {
+  /** İl */
+  province: string
+  /** İlçe */
+  district: string
+  /** Mahalle */
+  neighborhood: string
+  /** Sokak / cadde */
+  street: string
+  /** Kapı no */
+  buildingNo: string
+}
+
 const TR_BIAS = { lat: 39.0, lon: 35.0 }
-const TR_BBOX = '25.6,35.8,44.9,42.2'
 
 function labelFromPhoton(p: PhotonProps): { name: string; label: string } {
-  const streetLine = [p.housenumber, p.street].filter(Boolean).join(' ').trim()
-  const name = streetLine || p.name || p.district || p.city || 'Konum'
+  const streetLine = [p.housenumber, p.street || p.name].filter(Boolean).join(' ').trim()
+  const name = streetLine || p.locality || p.district || p.city || 'Konum'
   const parts = [
-    streetLine && p.name && p.name !== streetLine ? p.name : null,
     streetLine || null,
-    !streetLine ? p.name : null,
+    p.locality,
     p.district,
-    p.city || p.county,
+    p.city,
     p.state,
     p.postcode,
   ].filter(Boolean) as string[]
@@ -54,6 +66,7 @@ function labelFromPhoton(p: PhotonProps): { name: string; label: string } {
 }
 
 function fromPhoton(features: PhotonFeature[] | undefined): GeocodeHit[] {
+  const seen = new Set<string>()
   return (features ?? [])
     .map((f, i) => {
       const coords = f.geometry?.coordinates
@@ -63,21 +76,38 @@ function fromPhoton(features: PhotonFeature[] | undefined): GeocodeHit[] {
       if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null
       if (props.countrycode && props.countrycode.toUpperCase() !== 'TR') return null
       const { name, label } = labelFromPhoton(props)
-      return {
-        id: `${props.osm_type ?? 'p'}-${props.osm_id ?? i}-${lat.toFixed(5)},${lng.toFixed(5)}`,
-        name,
-        label,
-        lat,
-        lng,
-      } satisfies GeocodeHit
+      const id = `${props.osm_type ?? 'p'}-${props.osm_id ?? i}-${lat.toFixed(5)},${lng.toFixed(5)}`
+      if (seen.has(id)) return null
+      seen.add(id)
+      return { id, name, label, lat, lng } satisfies GeocodeHit
     })
     .filter((h): h is GeocodeHit => h != null)
 }
 
-async function searchPhoton(query: string): Promise<GeocodeHit[]> {
+async function searchPhotonFree(query: string, bias?: { lat: number; lng: number }): Promise<GeocodeHit[]> {
+  const lat = bias?.lat ?? TR_BIAS.lat
+  const lon = bias?.lng ?? TR_BIAS.lon
   const url =
     `https://photon.komoot.io/api/?q=${encodeURIComponent(query)}` +
-    `&lang=tr&limit=8&lat=${TR_BIAS.lat}&lon=${TR_BIAS.lon}&bbox=${TR_BBOX}`
+    `&lang=tr&limit=8&lat=${lat}&lon=${lon}`
+  const res = await fetch(url)
+  if (!res.ok) throw new Error('Adres araması başarısız')
+  const data = (await res.json()) as PhotonResponse
+  return fromPhoton(data.features)
+}
+
+async function searchPhotonStructured(parts: StructuredAddress): Promise<GeocodeHit[]> {
+  const params = new URLSearchParams()
+  params.set('countrycode', 'TR')
+  params.set('limit', '8')
+  params.set('lang', 'tr')
+  if (parts.province.trim()) params.set('state', parts.province.trim())
+  if (parts.district.trim()) params.set('city', parts.district.trim())
+  if (parts.neighborhood.trim()) params.set('district', parts.neighborhood.trim())
+  if (parts.street.trim()) params.set('street', parts.street.trim())
+  if (parts.buildingNo.trim()) params.set('housenumber', parts.buildingNo.trim())
+
+  const url = `https://photon.komoot.io/structured?${params.toString()}`
   const res = await fetch(url)
   if (!res.ok) throw new Error('Adres araması başarısız')
   const data = (await res.json()) as PhotonResponse
@@ -106,17 +136,86 @@ async function searchOpenMeteo(query: string): Promise<GeocodeHit[]> {
     })
 }
 
+function composeAddressQuery(parts: StructuredAddress): string {
+  return [
+    parts.street.trim() && parts.buildingNo.trim()
+      ? `${parts.street.trim()} No:${parts.buildingNo.trim()}`
+      : parts.street.trim(),
+    parts.neighborhood.trim(),
+    parts.district.trim(),
+    parts.province.trim(),
+  ]
+    .filter(Boolean)
+    .join(' ')
+}
+
+/** İl / ilçe / mahalle / sokak alanlarıyla konum bul. */
+export async function searchStructuredAddress(
+  parts: StructuredAddress,
+  bias?: { lat: number; lng: number },
+): Promise<GeocodeHit[]> {
+  if (!parts.province.trim() || !parts.district.trim()) {
+    throw new Error('İl ve ilçe zorunlu.')
+  }
+
+  const results: GeocodeHit[] = []
+  const pushUnique = (list: GeocodeHit[]) => {
+    for (const hit of list) {
+      if (!results.some((r) => r.id === hit.id)) results.push(hit)
+    }
+  }
+
+  try {
+    pushUnique(await searchPhotonStructured(parts))
+  } catch {
+    /* continue */
+  }
+
+  if (results.length === 0 && parts.street.trim()) {
+    try {
+      // Mahalle bazen city/district karışıyor; sokak + ilçe + il ile tekrar dene
+      pushUnique(
+        await searchPhotonStructured({
+          ...parts,
+          neighborhood: '',
+        }),
+      )
+    } catch {
+      /* continue */
+    }
+  }
+
+  const freeQuery = composeAddressQuery(parts)
+  if (results.length < 3 && freeQuery.length >= 3) {
+    try {
+      pushUnique(await searchPhotonFree(freeQuery, bias))
+    } catch {
+      /* continue */
+    }
+  }
+
+  if (results.length === 0 && freeQuery.length >= 3) {
+    pushUnique(await searchOpenMeteo(freeQuery))
+  }
+
+  // En azından ilçe merkezi
+  if (results.length === 0) {
+    pushUnique(await searchOpenMeteo(`${parts.district.trim()}, ${parts.province.trim()}`))
+  }
+
+  return results
+}
+
+/** Serbest metin araması (yedek). */
 export async function searchPlaces(query: string): Promise<GeocodeHit[]> {
   const q = query.trim()
   if (q.length < 3) return []
-
   try {
-    const photon = await searchPhoton(q)
+    const photon = await searchPhotonFree(q)
     if (photon.length > 0) return photon
   } catch {
     /* fall through */
   }
-
   return searchOpenMeteo(q)
 }
 
@@ -150,6 +249,7 @@ export function isValidTurkeyCoord(lat: number, lng: number): boolean {
 
 export const DEFAULT_MAP_CENTER = { lat: 41.0082, lng: 28.9784 }
 
+/** Mobil WebView için Leaflet HTML (web artık native Leaflet kullanır). */
 export function buildMapPickerHtml(lat: number, lng: number, zoom = 15): string {
   const safeLat = Number.isFinite(lat) ? lat : DEFAULT_MAP_CENTER.lat
   const safeLng = Number.isFinite(lng) ? lng : DEFAULT_MAP_CENTER.lng
@@ -176,7 +276,7 @@ export function buildMapPickerHtml(lat: number, lng: number, zoom = 15): string 
   <script>
     const start = { lat: ${safeLat}, lng: ${safeLng} };
     const map = L.map('map', { zoomControl: true }).setView([start.lat, start.lng], ${zoom});
-    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
       maxZoom: 19,
       attribution: '&copy; OpenStreetMap'
     }).addTo(map);
@@ -191,7 +291,7 @@ export function buildMapPickerHtml(lat: number, lng: number, zoom = 15): string 
       emit(e.latlng);
     });
     marker.on('dragend', function () { emit(marker.getLatLng()); });
-    setTimeout(function () { map.invalidateSize(); emit(marker.getLatLng()); }, 200);
+    setTimeout(function () { map.invalidateSize(); emit(marker.getLatLng()); }, 250);
   </script>
 </body>
 </html>`

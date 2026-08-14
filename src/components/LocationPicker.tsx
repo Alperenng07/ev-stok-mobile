@@ -13,10 +13,12 @@ import {
   DEFAULT_MAP_CENTER,
   isValidTurkeyCoord,
   reverseGeocode,
-  searchPlaces,
+  searchStructuredAddress,
+  type StructuredAddress,
 } from '../lib/geocode'
 import { resolveLiveLocation } from '../lib/location'
 import { locationPrefsStore } from '../lib/locationPrefsStore'
+import { TURKEY_PROVINCES } from '../lib/turkeyProvinces'
 import { colors } from '../theme/colors'
 import type { GeocodeHit, LocationPreference, ShoppingLocation } from '../types/location'
 import { Button } from './ui'
@@ -26,13 +28,21 @@ type Props = {
   onChange: (prefs: LocationPreference) => void
 }
 
-type AddMode = 'address' | 'map' | 'gps'
+type AddMode = 'form' | 'map' | 'gps'
+
+const EMPTY_ADDR: StructuredAddress = {
+  province: 'İstanbul',
+  district: '',
+  neighborhood: '',
+  street: '',
+  buildingNo: '',
+}
 
 export function LocationPicker({ prefs, onChange }: Props) {
   const [adding, setAdding] = useState(false)
-  const [addMode, setAddMode] = useState<AddMode>('address')
+  const [addMode, setAddMode] = useState<AddMode>('form')
   const [name, setName] = useState('Ev')
-  const [query, setQuery] = useState('')
+  const [addr, setAddr] = useState<StructuredAddress>(EMPTY_ADDR)
   const [hits, setHits] = useState<GeocodeHit[]>([])
   const [searching, setSearching] = useState(false)
   const [busy, setBusy] = useState(false)
@@ -41,13 +51,9 @@ export function LocationPicker({ prefs, onChange }: Props) {
   const [mapPin, setMapPin] = useState(DEFAULT_MAP_CENTER)
   const [mapLabel, setMapLabel] = useState('Haritadan seçilen nokta')
   const [mapKey, setMapKey] = useState(0)
+  const [provinceOpen, setProvinceOpen] = useState(false)
 
-  const mapHtml = useMemo(
-    () => buildMapPickerHtml(mapPin.lat, mapPin.lng),
-    // Yeniden kurulum yalnızca mapKey ile (GPS merkezleme)
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [mapKey],
-  )
+  const mapHtml = useMemo(() => buildMapPickerHtml(mapPin.lat, mapPin.lng), [mapKey])
 
   useEffect(() => {
     if (!adding || addMode !== 'map') return
@@ -79,16 +85,12 @@ export function LocationPicker({ prefs, onChange }: Props) {
   function removePlace(id: string) {
     const places = prefs.places.filter((p) => p.id !== id)
     const savedId = prefs.savedId === id ? null : prefs.savedId
-    void persist({
-      places,
-      savedId,
-      mode: savedId ? 'saved' : 'live',
-    })
+    void persist({ places, savedId, mode: savedId ? 'saved' : 'live' })
   }
 
   function addPlace(place: Omit<ShoppingLocation, 'id' | 'createdAt'>) {
     if (!isValidTurkeyCoord(place.lat, place.lng)) {
-      setErr('Seçilen nokta Türkiye dışında. Haritadan veya adresle yeniden dene.')
+      setErr('Seçilen nokta Türkiye dışında. Yeniden dene.')
       return
     }
     const next: ShoppingLocation = {
@@ -96,38 +98,41 @@ export function LocationPicker({ prefs, onChange }: Props) {
       id: crypto.randomUUID(),
       createdAt: new Date().toISOString(),
     }
-    const places = [...prefs.places, next]
-    void persist({ mode: 'saved', savedId: next.id, places })
+    void persist({ mode: 'saved', savedId: next.id, places: [...prefs.places, next] })
     setAdding(false)
-    setQuery('')
     setHits([])
     setMsg(`“${next.name}” kaydedildi ve seçildi.`)
     setErr(null)
   }
 
-  async function runAddressSearch() {
-    const q = query.trim()
-    if (q.length < 3) {
-      setErr('En az 3 karakterlik açık adres yaz (mahalle, cadde, semt…).')
-      return
-    }
+  function setAddrField<K extends keyof StructuredAddress>(key: K, value: string) {
+    setAddr((prev) => ({ ...prev, [key]: value }))
+  }
+
+  async function runStructuredSearch() {
     setSearching(true)
     setErr(null)
+    setHits([])
     try {
-      const found = await searchPlaces(q)
+      const province = TURKEY_PROVINCES.find((p) => p.name === addr.province)
+      const found = await searchStructuredAddress(addr, province)
       setHits(found)
-      if (found.length === 0) setErr('Adres bulunamadı. Daha açık yaz veya haritadan seç.')
+      if (found.length === 0) {
+        setErr('Konum bulunamadı. İlçe/mahalle/sokak bilgisini kontrol et veya haritadan seç.')
+      } else if (found[0]) {
+        setMapPin({ lat: found[0].lat, lng: found[0].lng })
+        setMapLabel(found[0].label)
+        setMapKey((k) => k + 1)
+      }
     } catch (e) {
       setErr(e instanceof Error ? e.message : 'Adres araması başarısız')
-      setHits([])
     } finally {
       setSearching(false)
     }
   }
 
   async function saveCurrent() {
-    const trimmed = name.trim()
-    if (trimmed.length < 1) {
+    if (!name.trim()) {
       setErr('Konuma bir ad ver (ör. Ev, İş).')
       return
     }
@@ -135,12 +140,7 @@ export function LocationPicker({ prefs, onChange }: Props) {
     setErr(null)
     try {
       const loc = await resolveLiveLocation()
-      addPlace({
-        name: trimmed,
-        lat: loc.lat,
-        lng: loc.lng,
-        label: loc.label,
-      })
+      addPlace({ name: name.trim(), lat: loc.lat, lng: loc.lng, label: loc.label })
     } catch (e) {
       setErr(e instanceof Error ? e.message : 'Konum alınamadı')
     } finally {
@@ -209,7 +209,7 @@ export function LocationPicker({ prefs, onChange }: Props) {
         </Pressable>
       </View>
       <Text style={styles.hint}>
-        İşteyken eve göre hesapla: açık adres yaz veya haritadan pin koy, sonra “Ev” seç.
+        İl → ilçe → mahalle → sokak ile ekle; istersen haritadan pin koy.
       </Text>
 
       <View style={styles.chips}>
@@ -254,14 +254,14 @@ export function LocationPicker({ prefs, onChange }: Props) {
           <TextInput
             value={name}
             onChangeText={setName}
-            placeholder="Ev, İş, Anne evi…"
+            placeholder="Ev, İş…"
             placeholderTextColor={colors.inkMuted}
             style={styles.input}
           />
 
           <View style={styles.chips}>
             {([
-              ['address', 'Açık adres'],
+              ['form', 'İl / İlçe / Sokak'],
               ['map', 'Harita'],
               ['gps', 'Anlık GPS'],
             ] as const).map(([id, label]) => (
@@ -277,30 +277,75 @@ export function LocationPicker({ prefs, onChange }: Props) {
             ))}
           </View>
 
-          {addMode === 'address' ? (
+          {addMode === 'form' ? (
             <>
-              <Text style={styles.fieldLabel}>Açık adres</Text>
+              <Text style={styles.fieldLabel}>İl *</Text>
+              <Pressable
+                style={styles.input}
+                onPress={() => setProvinceOpen((v) => !v)}
+              >
+                <Text style={styles.chipText}>{addr.province}</Text>
+              </Pressable>
+              {provinceOpen ? (
+                <View style={styles.provinceList}>
+                  {TURKEY_PROVINCES.map((p) => (
+                    <Pressable
+                      key={p.name}
+                      onPress={() => {
+                        setAddrField('province', p.name)
+                        setMapPin({ lat: p.lat, lng: p.lng })
+                        setMapKey((k) => k + 1)
+                        setProvinceOpen(false)
+                      }}
+                      style={styles.provinceItem}
+                    >
+                      <Text style={styles.chipText}>{p.name}</Text>
+                    </Pressable>
+                  ))}
+                </View>
+              ) : null}
+              <Text style={styles.fieldLabel}>İlçe *</Text>
               <TextInput
-                value={query}
-                onChangeText={setQuery}
-                placeholder="Caferağa Mah. Moda Cad. No:12 Kadıköy İstanbul"
+                value={addr.district}
+                onChangeText={(v) => setAddrField('district', v)}
+                placeholder="Kadıköy"
                 placeholderTextColor={colors.inkMuted}
-                style={[styles.input, styles.textarea]}
-                multiline
+                style={styles.input}
+              />
+              <Text style={styles.fieldLabel}>Mahalle</Text>
+              <TextInput
+                value={addr.neighborhood}
+                onChangeText={(v) => setAddrField('neighborhood', v)}
+                placeholder="Caferağa"
+                placeholderTextColor={colors.inkMuted}
+                style={styles.input}
+              />
+              <Text style={styles.fieldLabel}>Sokak / Cadde</Text>
+              <TextInput
+                value={addr.street}
+                onChangeText={(v) => setAddrField('street', v)}
+                placeholder="Moda Caddesi"
+                placeholderTextColor={colors.inkMuted}
+                style={styles.input}
+              />
+              <Text style={styles.fieldLabel}>Kapı no</Text>
+              <TextInput
+                value={addr.buildingNo}
+                onChangeText={(v) => setAddrField('buildingNo', v)}
+                placeholder="12"
+                placeholderTextColor={colors.inkMuted}
+                style={styles.input}
               />
               <Button
-                label={searching ? 'Aranıyor…' : 'Adresi bul'}
+                label={searching ? 'Aranıyor…' : 'Konumu bul'}
                 variant="secondary"
-                onPress={() => void runAddressSearch()}
+                onPress={() => void runStructuredSearch()}
                 loading={searching}
               />
               {hits.map((h) => (
                 <Pressable key={h.id} onPress={() => saveHit(h)} style={styles.hit}>
                   <Text style={styles.hitName}>{h.name}</Text>
                   <Text style={styles.hitLabel}>{h.label}</Text>
-                  <Text style={styles.hitLabel}>
-                    {h.lat.toFixed(5)}, {h.lng.toFixed(5)}
-                  </Text>
                 </Pressable>
               ))}
             </>
@@ -390,10 +435,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: 12,
     paddingVertical: 8,
   },
-  chipActive: {
-    borderColor: colors.brand,
-    backgroundColor: '#EAF2EE',
-  },
+  chipActive: { borderColor: colors.brand, backgroundColor: '#EAF2EE' },
   chipText: { fontWeight: '700', color: colors.ink, fontSize: 13 },
   chipTextActive: { color: colors.brand },
   selected: {
@@ -403,11 +445,7 @@ const styles = StyleSheet.create({
     fontSize: 13,
     lineHeight: 18,
   },
-  selectedMuted: {
-    marginTop: 10,
-    color: colors.inkMuted,
-    fontSize: 13,
-  },
+  selectedMuted: { marginTop: 10, color: colors.inkMuted, fontSize: 13 },
   ok: { marginTop: 8, color: colors.ok, fontWeight: '600' },
   error: { marginTop: 8, color: colors.danger, fontWeight: '600' },
   addBox: {
@@ -419,11 +457,7 @@ const styles = StyleSheet.create({
     backgroundColor: colors.bgElevated,
     gap: 8,
   },
-  fieldLabel: {
-    fontSize: 12,
-    fontWeight: '700',
-    color: colors.inkMuted,
-  },
+  fieldLabel: { fontSize: 12, fontWeight: '700', color: colors.inkMuted },
   input: {
     borderWidth: 1,
     borderColor: colors.border,
@@ -433,9 +467,18 @@ const styles = StyleSheet.create({
     color: colors.ink,
     backgroundColor: colors.bg,
   },
-  textarea: {
-    minHeight: 78,
-    textAlignVertical: 'top',
+  provinceList: {
+    maxHeight: 180,
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: 10,
+    backgroundColor: colors.bg,
+  },
+  provinceItem: {
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    borderBottomWidth: 1,
+    borderBottomColor: colors.border,
   },
   mapWrap: {
     height: 260,
